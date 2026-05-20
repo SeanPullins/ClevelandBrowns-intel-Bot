@@ -33,8 +33,6 @@ jobs:
 
       - name: Build
         run: npm run build
-        env:
-          NODE_ENV: production
 
       - name: Copy latest data into dist
         run: |
@@ -43,6 +41,8 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
