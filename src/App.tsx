@@ -33,10 +33,12 @@ export default function App() {
   const [items, setItems] = useState<IntelItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
   const [sortMode, setSortMode] = useState<SortMode>("signal");
   const [showFullBrief, setShowFullBrief] = useState(false);
+  const [nightMode, setNightMode] = useState(false);
 
   async function loadReport() {
     setLoading(true);
@@ -63,6 +65,8 @@ export default function App() {
   useEffect(() => {
     loadReport();
   }, []);
+
+  const t = theme(nightMode);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -119,61 +123,73 @@ export default function App() {
   }, [items]);
 
   return (
-    <main className="min-h-screen bg-[#08090c] text-zinc-100">
+    <main className={`min-h-screen transition-colors duration-300 ${t.page}`}>
       <div className="mx-auto max-w-5xl px-3 py-4 md:px-6 md:py-8">
-        <header className="rounded-3xl border border-white/10 bg-zinc-950 p-4 shadow-xl md:p-7">
+        <header className={`rounded-3xl border p-4 shadow-xl md:p-7 ${t.hero}`}>
           <div className="flex items-start justify-between gap-4">
             <div>
-              <p className="text-[11px] font-black uppercase tracking-[0.22em] text-orange-400">
+              <p className={`text-[11px] font-black uppercase tracking-[0.22em] ${t.eyebrow}`}>
                 Browns Intelligence
               </p>
-              <h1 className="mt-2 text-3xl font-black tracking-[-0.05em] text-white md:text-5xl">
+
+              <h1 className={`mt-2 text-3xl font-black tracking-[-0.05em] md:text-5xl ${t.heading}`}>
                 Daily Brief
               </h1>
-              <p className="mt-2 text-sm leading-6 text-zinc-400 md:text-base">
+
+              <p className={`mt-2 text-sm leading-6 md:text-base ${t.muted}`}>
                 AI summary and links from the latest Browns stories.
               </p>
             </div>
 
-            <button
-              onClick={loadReport}
-              className="shrink-0 rounded-2xl bg-orange-600 px-4 py-2 text-sm font-black text-white hover:bg-orange-500"
-            >
-              Refresh
-            </button>
+            <div className="flex shrink-0 flex-col gap-2">
+              <button
+                onClick={() => setNightMode((v) => !v)}
+                className={t.modeButton}
+              >
+                {nightMode ? "Day Mode" : "Night Mode"}
+              </button>
+
+              <button
+                onClick={loadReport}
+                className="rounded-2xl bg-orange-600 px-4 py-2 text-sm font-black text-white hover:bg-orange-500"
+              >
+                Refresh
+              </button>
+            </div>
           </div>
 
           <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">
-            <Stat label="Updated" value={formatDate(report?.generated_at)} />
-            <Stat label="Stories" value={String(items.length)} />
-            <Stat label="New" value={String(items.filter((x) => x.is_new).length)} />
-            <Stat label="AI" value={statusLabel(report?.ai_provider_status)} />
+            <Stat label="Updated" value={formatDate(report?.generated_at)} t={t} />
+            <Stat label="Stories" value={String(items.length)} t={t} />
+            <Stat label="New" value={String(items.filter((x) => x.is_new).length)} t={t} />
+            <Stat label="AI" value={statusLabel(report?.ai_provider_status)} t={t} />
           </div>
         </header>
 
-        {loading && <SimplePanel>Loading latest Browns report…</SimplePanel>}
+        {loading && <SimplePanel t={t}>Loading latest Browns report…</SimplePanel>}
 
         {error && (
-          <SimplePanel className="border-red-800/50 bg-red-950/30">
-            <h2 className="text-xl font-black text-red-200">Could not load report</h2>
-            <p className="mt-2 text-sm text-red-100">{error}</p>
+          <SimplePanel t={t} className="border-red-500/50 bg-red-100/70 text-red-950">
+            <h2 className="text-xl font-black">Could not load report</h2>
+            <p className="mt-2 text-sm">{error}</p>
           </SimplePanel>
         )}
 
         {!loading && !error && (
           <>
-            <section className="mt-4 rounded-3xl border border-orange-900/30 bg-gradient-to-br from-zinc-950 to-black p-4 shadow-xl md:p-6">
+            <section className={`mt-4 rounded-3xl border p-4 shadow-xl md:p-6 ${t.panel}`}>
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-[11px] font-black uppercase tracking-[0.22em] text-orange-400">
+                  <p className={`text-[11px] font-black uppercase tracking-[0.22em] ${t.eyebrow}`}>
                     AI Summary
                   </p>
-                  <h2 className="mt-1 text-2xl font-black tracking-tight text-white">
+
+                  <h2 className={`mt-1 text-2xl font-black tracking-tight ${t.heading}`}>
                     What matters
                   </h2>
                 </div>
 
-                <span className="rounded-full border border-white/10 px-3 py-1 text-[11px] font-black uppercase text-zinc-400">
+                <span className={t.badge}>
                   {report?.ai_model ? "AI" : "No AI"}
                 </span>
               </div>
@@ -181,13 +197,13 @@ export default function App() {
               {quickBullets.length > 0 ? (
                 <div className="mt-4 space-y-3">
                   {quickBullets.map((line, index) => (
-                    <p key={index} className="rounded-2xl border border-white/10 bg-white/[0.035] p-3 text-sm leading-6 text-zinc-200">
+                    <p key={index} className={`rounded-2xl border p-3 text-sm leading-6 ${t.summaryBubble}`}>
                       {line}
                     </p>
                   ))}
                 </div>
               ) : (
-                <p className="mt-4 text-sm text-zinc-400">
+                <p className={`mt-4 text-sm ${t.muted}`}>
                   No AI summary available yet.
                 </p>
               )}
@@ -196,14 +212,14 @@ export default function App() {
                 <div className="mt-4">
                   <button
                     onClick={() => setShowFullBrief((v) => !v)}
-                    className="rounded-2xl border border-white/10 px-4 py-2 text-sm font-bold text-zinc-300 hover:bg-white/5"
+                    className={t.secondaryButton}
                   >
                     {showFullBrief ? "Hide details" : "More AI detail"}
                   </button>
 
                   {showFullBrief && (
-                    <div className="mt-4 rounded-2xl border border-white/10 bg-black/35 p-4">
-                      <ReadableText text={cleanAIText(report.ai_brief)} />
+                    <div className={`mt-4 rounded-2xl border p-4 ${t.detailBox}`}>
+                      <ReadableText text={cleanAIText(report.ai_brief)} t={t} />
                     </div>
                   )}
                 </div>
@@ -211,8 +227,9 @@ export default function App() {
             </section>
 
             {topItems.length > 0 && (
-              <section className="mt-4 rounded-3xl border border-white/10 bg-zinc-950 p-4 md:p-5">
-                <h2 className="text-lg font-black text-white">Top links</h2>
+              <section className={`mt-4 rounded-3xl border p-4 md:p-5 ${t.panel}`}>
+                <h2 className={`text-lg font-black ${t.heading}`}>Top links</h2>
+
                 <div className="mt-3 flex gap-3 overflow-x-auto pb-2">
                   {topItems.map((item, index) => (
                     <a
@@ -220,12 +237,12 @@ export default function App() {
                       href={item.url}
                       target="_blank"
                       rel="noreferrer"
-                      className="min-w-[260px] rounded-2xl border border-white/10 bg-black/30 p-4 hover:border-orange-500/50"
+                      className={t.topLinkCard}
                     >
-                      <p className="line-clamp-3 text-sm font-black leading-6 text-white">
+                      <p className="line-clamp-3 text-sm font-black leading-6 text-orange-600">
                         {item.title}
                       </p>
-                      <p className="mt-2 text-xs text-zinc-500">
+                      <p className={`mt-2 text-xs ${t.muted}`}>
                         {item.source_name || "Unknown source"}
                       </p>
                     </a>
@@ -234,19 +251,19 @@ export default function App() {
               </section>
             )}
 
-            <section className="sticky top-0 z-20 mt-4 rounded-3xl border border-white/10 bg-zinc-950/95 p-3 backdrop-blur md:static md:p-5">
+            <section className={`sticky top-0 z-20 mt-4 rounded-3xl border p-3 backdrop-blur md:static md:p-5 ${t.filterBar}`}>
               <div className="grid gap-2 md:grid-cols-[1.4fr_0.8fr_0.8fr]">
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder="Search stories…"
-                  className="rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-orange-500"
+                  className={t.input}
                 />
 
                 <select
                   value={category}
                   onChange={(e) => setCategory(e.target.value)}
-                  className="rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none focus:border-orange-500"
+                  className={t.input}
                 >
                   {categories.map((cat) => (
                     <option key={cat} value={cat}>
@@ -258,7 +275,7 @@ export default function App() {
                 <select
                   value={sortMode}
                   onChange={(e) => setSortMode(e.target.value as SortMode)}
-                  className="rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none focus:border-orange-500"
+                  className={t.input}
                 >
                   <option value="signal">Top signal</option>
                   <option value="newest">Newest</option>
@@ -267,17 +284,19 @@ export default function App() {
               </div>
             </section>
 
-            <section className="mt-4 rounded-3xl border border-white/10 bg-zinc-950 p-4 md:p-6">
+            <section className={`mt-4 rounded-3xl border p-4 md:p-6 ${t.panel}`}>
               <div className="flex items-end justify-between gap-4">
                 <div>
-                  <p className="text-[11px] font-black uppercase tracking-[0.22em] text-orange-400">
+                  <p className={`text-[11px] font-black uppercase tracking-[0.22em] ${t.eyebrow}`}>
                     Stories
                   </p>
-                  <h2 className="mt-1 text-2xl font-black text-white">
+
+                  <h2 className={`mt-1 text-2xl font-black ${t.heading}`}>
                     Found links
                   </h2>
                 </div>
-                <p className="text-sm font-bold text-zinc-500">
+
+                <p className={`text-sm font-bold ${t.muted}`}>
                   {filteredItems.length}/{items.length}
                 </p>
               </div>
@@ -286,12 +305,13 @@ export default function App() {
                 <EmptyState
                   title="No real Browns stories collected"
                   body="The bot did not find real source items in the latest run."
+                  t={t}
                 />
               )}
 
-              <div className="mt-4 divide-y divide-white/10">
+              <div className={`mt-4 divide-y ${t.divider}`}>
                 {filteredItems.map((item, index) => (
-                  <StoryCompact key={item.id || item.url || index} item={item} />
+                  <StoryCompact key={item.id || item.url || index} item={item} t={t} />
                 ))}
               </div>
             </section>
@@ -302,31 +322,31 @@ export default function App() {
   );
 }
 
-function StoryCompact({ item }: { item: IntelItem }) {
+function StoryCompact({ item, t }: { item: IntelItem; t: ReturnType<typeof theme> }) {
   return (
     <article className="py-4">
       <div className="flex gap-3">
         <div className="min-w-0 flex-1">
           <div className="mb-2 flex flex-wrap gap-2">
-            <Badge>{item.category || "General Browns"}</Badge>
-            {item.is_new && <Badge tone="green">New</Badge>}
+            <Badge t={t}>{item.category || "General Browns"}</Badge>
+            {item.is_new && <Badge t={t} tone="green">New</Badge>}
           </div>
 
-          <h3 className="text-base font-black leading-6 text-white md:text-lg">
-            <a href={item.url} target="_blank" rel="noreferrer" className="hover:text-orange-300">
+          <h3 className={`text-base font-black leading-6 md:text-lg ${t.heading}`}>
+            <a href={item.url} target="_blank" rel="noreferrer" className="text-orange-600 hover:text-orange-500">
               {item.title}
             </a>
           </h3>
 
-          <p className="mt-1 text-xs text-zinc-500">
+          <p className={`mt-1 text-xs ${t.muted}`}>
             {item.source_name || "Unknown source"} · {formatDate(item.published)}
           </p>
 
           <details className="mt-3">
-            <summary className="cursor-pointer text-sm font-bold text-orange-300">
+            <summary className="cursor-pointer text-sm font-bold text-orange-600">
               Summary
             </summary>
-            <p className="mt-2 text-sm leading-6 text-zinc-300">
+            <p className={`mt-2 text-sm leading-6 ${t.body}`}>
               {cleanAIText(item.summary || "No summary available.")}
             </p>
           </details>
@@ -345,54 +365,134 @@ function StoryCompact({ item }: { item: IntelItem }) {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, t }: { label: string; value: string; t: ReturnType<typeof theme> }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-black/30 p-3">
-      <p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">{label}</p>
-      <p className="mt-1 truncate text-sm font-black text-zinc-100">{value}</p>
+    <div className={t.stat}>
+      <p className={`text-[10px] font-black uppercase tracking-widest ${t.statLabel}`}>{label}</p>
+      <p className={`mt-1 truncate text-sm font-black ${t.heading}`}>{value}</p>
     </div>
   );
 }
 
-function SimplePanel({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+function SimplePanel({
+  children,
+  className = "",
+  t,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  t: ReturnType<typeof theme>;
+}) {
   return (
-    <section className={`mt-4 rounded-3xl border border-white/10 bg-zinc-950 p-5 ${className}`}>
+    <section className={`mt-4 rounded-3xl border p-5 ${t.panel} ${className}`}>
       {children}
     </section>
   );
 }
 
-function Badge({ children, tone = "zinc" }: { children: React.ReactNode; tone?: "zinc" | "green" }) {
+function Badge({
+  children,
+  tone = "zinc",
+  t,
+}: {
+  children: React.ReactNode;
+  tone?: "zinc" | "green";
+  t: ReturnType<typeof theme>;
+}) {
   const classes =
     tone === "green"
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-      : "border-white/10 bg-white/[0.04] text-zinc-300";
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700"
+      : t.badge;
 
   return <span className={`rounded-full border px-2.5 py-1 text-[11px] font-black ${classes}`}>{children}</span>;
 }
 
-function EmptyState({ title, body }: { title: string; body: string }) {
+function EmptyState({
+  title,
+  body,
+  t,
+}: {
+  title: string;
+  body: string;
+  t: ReturnType<typeof theme>;
+}) {
   return (
-    <div className="mt-4 rounded-2xl border border-dashed border-white/15 bg-black/25 p-6 text-center">
-      <h3 className="text-lg font-black text-white">{title}</h3>
-      <p className="mt-2 text-sm leading-6 text-zinc-400">{body}</p>
+    <div className={`mt-4 rounded-2xl border border-dashed p-6 text-center ${t.empty}`}>
+      <h3 className={`text-lg font-black ${t.heading}`}>{title}</h3>
+      <p className={`mt-2 text-sm leading-6 ${t.muted}`}>{body}</p>
     </div>
   );
 }
 
-function ReadableText({ text }: { text: string }) {
+function ReadableText({ text, t }: { text: string; t: ReturnType<typeof theme> }) {
   const paragraphs = text
     .split(/\n{2,}/)
     .map((line) => line.trim())
     .filter(Boolean);
 
   return (
-    <div className="space-y-3 text-sm leading-7 text-zinc-300">
+    <div className={`space-y-3 text-sm leading-7 ${t.body}`}>
       {paragraphs.map((paragraph, index) => (
         <p key={index}>{paragraph}</p>
       ))}
     </div>
   );
+}
+
+function theme(night: boolean) {
+  if (night) {
+    return {
+      page: "bg-[#24140d] text-white",
+      hero: "border-white/15 bg-[#321d12] text-white",
+      panel: "border-white/15 bg-[#321d12] text-white",
+      filterBar: "border-white/15 bg-[#321d12]/95 text-white",
+      heading: "text-white",
+      body: "text-orange-50",
+      muted: "text-orange-100/70",
+      eyebrow: "text-orange-300",
+      divider: "divide-white/15",
+      stat: "rounded-2xl border border-white/15 bg-white/10 p-3",
+      statLabel: "text-orange-100/60",
+      badge: "border-white/20 bg-white/10 text-white",
+      empty: "border-white/20 bg-white/10",
+      input:
+        "rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-sm text-white outline-none placeholder:text-orange-100/50 focus:border-orange-400",
+      modeButton:
+        "rounded-2xl border border-white/25 bg-white px-4 py-2 text-sm font-black text-[#321d12] hover:bg-orange-100",
+      secondaryButton:
+        "rounded-2xl border border-white/20 px-4 py-2 text-sm font-bold text-white hover:bg-white/10",
+      summaryBubble: "border-white/15 bg-white/10 text-orange-50",
+      detailBox: "border-white/15 bg-white/10",
+      topLinkCard:
+        "min-w-[260px] rounded-2xl border border-white/15 bg-white/10 p-4 hover:border-orange-300",
+    };
+  }
+
+  return {
+    page: "bg-[#fbf8f4] text-[#2b170f]",
+    hero: "border-orange-900/15 bg-white text-[#2b170f]",
+    panel: "border-orange-900/15 bg-white text-[#2b170f]",
+    filterBar: "border-orange-900/15 bg-white/95 text-[#2b170f]",
+    heading: "text-[#2b170f]",
+    body: "text-[#3b261b]",
+    muted: "text-[#6f5a4d]",
+    eyebrow: "text-orange-700",
+    divider: "divide-orange-900/10",
+    stat: "rounded-2xl border border-orange-900/10 bg-[#fff8f0] p-3",
+    statLabel: "text-[#8a6c5a]",
+    badge: "border-orange-900/15 bg-orange-50 text-[#4a2a18]",
+    empty: "border-orange-900/20 bg-[#fff8f0]",
+    input:
+      "rounded-2xl border border-orange-900/15 bg-white px-4 py-3 text-sm text-[#2b170f] outline-none placeholder:text-[#9b887b] focus:border-orange-500",
+    modeButton:
+      "rounded-2xl border border-[#4a2a18] bg-[#4a2a18] px-4 py-2 text-sm font-black text-white hover:bg-[#321d12]",
+    secondaryButton:
+      "rounded-2xl border border-orange-900/15 px-4 py-2 text-sm font-bold text-[#4a2a18] hover:bg-orange-50",
+    summaryBubble: "border-orange-900/10 bg-[#fff8f0] text-[#3b261b]",
+    detailBox: "border-orange-900/10 bg-[#fff8f0]",
+    topLinkCard:
+      "min-w-[260px] rounded-2xl border border-orange-900/10 bg-[#fff8f0] p-4 hover:border-orange-500/50",
+  };
 }
 
 function extractSection(text: string, heading: string) {
