@@ -1,10 +1,7 @@
-requests
 feedparser
+requests
 beautifulsoup4
-trafilatura
-python-dateutil
-pyyaml
-jinja2
-yt-dlp
-youtube-transcript-api
 python-dotenv
+pyyaml
+python-dateutil
+yt-dlp

@@ -463,5 +463,516 @@ def main() -> int:
     return 0
 
 
+
+
+
+
+
+# --- BROWNS MEDIA COLLECTION OVERRIDE START ---
+
+# This override keeps the existing working article pipeline, then adds
+# Browns-only YouTube and podcast discovery. It also filters every returned item
+# so unrelated "Brown"/non-Browns links are removed before JSON is written.
+
+BROWNS_POSITIVE_TERMS = [
+    "cleveland browns",
+    "browns",
+    "dawg pound",
+    "orange and brown",
+    "myles garrett",
+    "kevin stefanski",
+    "andrew berry",
+    "shedeur sanders",
+    "dillon gabriel",
+    "joe flacco",
+    "kenny pickett",
+    "deshaun watson",
+]
+
+BROWNS_NEGATIVE_TERMS = [
+    "brown university",
+    "brown bears",
+    "brown county",
+    "brown trout",
+    "antonio brown",
+    "james brown",
+    "charlie brown",
+    "cleveland guardians",
+    "cleveland cavaliers",
+    "cleveland monsters",
+    "st. louis browns",
+]
+
+BROWNS_CONTEXT_TERMS = [
+    "nfl",
+    "football",
+    "quarterback",
+    "qb",
+    "otas",
+    "training camp",
+    "roster",
+    "draft",
+    "coach",
+    "injury",
+    "contract",
+    "offense",
+    "defense",
+    "wide receiver",
+    "running back",
+    "linebacker",
+    "edge",
+    "stadium",
+]
+
+KNOWN_BROWNS_SOURCES = [
+    "cleveland browns",
+    "cleveland browns daily",
+    "orange and brown talk",
+    "locked on browns",
+    "ultimate cleveland sports show",
+    "browns wire",
+    "dawgs by nature",
+    "cleveland.com",
+    "news 5 cleveland",
+    "wkyc",
+    "espn cleveland",
+    "92.3 the fan",
+]
+
+YOUTUBE_BROWNS_SEARCHES = [
+    "Cleveland Browns official latest",
+    "Cleveland Browns Daily",
+    "Cleveland Browns quarterback news",
+    "Cleveland Browns roster news",
+    "Cleveland Browns OTAs",
+    "Cleveland Browns draft news",
+    "Orange and Brown Talk Cleveland Browns",
+    "Locked On Browns Cleveland Browns",
+    "Ultimate Cleveland Sports Show Browns",
+    "WKYC Cleveland Browns",
+    "News 5 Cleveland Browns",
+    "cleveland.com Browns",
+]
+
+PODCAST_BROWNS_SEARCHES = [
+    "Cleveland Browns Daily",
+    "Orange and Brown Talk Cleveland Browns",
+    "Locked On Browns",
+    "Ultimate Cleveland Sports Show Browns",
+    "ESPN Cleveland Browns",
+    "Browns Wire podcast",
+]
+
+
+def _clean_media_text(value):
+    try:
+        return clean_text(value or "")
+    except Exception:
+        import html as _html
+        import re as _re
+        from bs4 import BeautifulSoup as _BeautifulSoup
+        value = _html.unescape(value or "")
+        value = _BeautifulSoup(value, "html.parser").get_text(" ", strip=True)
+        return _re.sub(r"\s+", " ", value).strip()
+
+
+def _known_browns_source(source_name="", url=""):
+    haystack = f" {source_name} {url} ".lower()
+    return any(term in haystack for term in KNOWN_BROWNS_SOURCES)
+
+
+def strict_browns_relevant(title, summary="", source_name="", url=""):
+    text = f" {title} {summary} {source_name} {url} ".lower()
+
+    if any(term in text for term in BROWNS_NEGATIVE_TERMS):
+        return False
+
+    if "cleveland browns" in text:
+        return True
+
+    if any(term in text for term in [
+        "dawg pound",
+        "orange and brown",
+        "myles garrett",
+        "kevin stefanski",
+        "andrew berry",
+    ]):
+        return True
+
+    if any(term in text for term in [
+        "shedeur sanders",
+        "dillon gabriel",
+        "joe flacco",
+        "kenny pickett",
+        "deshaun watson",
+    ]):
+        return "browns" in text or "cleveland" in text or _known_browns_source(source_name, url)
+
+    # "Browns" is acceptable only with NFL/sports context or a known Browns source.
+    if "browns" in text:
+        return _known_browns_source(source_name, url) or any(term in text for term in BROWNS_CONTEXT_TERMS)
+
+    # For known Browns podcasts/channels, allow sports/NFL episode titles even if "Browns"
+    # is only in the podcast/channel name.
+    if _known_browns_source(source_name, url):
+        return any(term in text for term in BROWNS_CONTEXT_TERMS)
+
+    return False
+
+
+def _media_parse_date(value):
+    try:
+        return parse_date(value)
+    except Exception:
+        import datetime as _dt
+        if isinstance(value, (int, float)):
+            return _dt.datetime.fromtimestamp(value, tz=_dt.timezone.utc)
+        if isinstance(value, str) and value.isdigit() and len(value) == 8:
+            try:
+                return _dt.datetime.strptime(value, "%Y%m%d").replace(tzinfo=_dt.timezone.utc)
+            except Exception:
+                pass
+        return now_utc()
+
+
+def _media_domain(url):
+    from urllib.parse import urlparse as _urlparse
+    return _urlparse(url or "").netloc.replace("www.", "").lower()
+
+
+def _media_id(title, url):
+    import hashlib as _hashlib
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(url or "")
+    raw = f"{title.lower()}|{parsed.netloc}{parsed.path}".encode("utf-8")
+    return _hashlib.sha1(raw).hexdigest()[:16]
+
+
+def _media_category(title, summary):
+    try:
+        return category_for(f"{title} {summary}")
+    except Exception:
+        return "General Browns"
+
+
+def _media_score(title, summary, source_weight, source_type):
+    text = f" {title} {summary} ".lower()
+    score = int(source_weight)
+    reasons = [f"source_weight +{source_weight}"]
+
+    if source_type == "youtube":
+        score += 4
+        reasons.append("youtube +4")
+    elif source_type == "podcast":
+        score += 5
+        reasons.append("podcast +5")
+
+    for term in BROWNS_POSITIVE_TERMS:
+        if term in text:
+            add = 8 if term in title.lower() else 3
+            score += add
+            reasons.append(f"{term} +{add}")
+
+    for term in ["trade proposal", "bold prediction", "dream scenario", "way-too-early", "fan proposal"]:
+        if term in text:
+            score -= 8
+            reasons.append(f"{term} -8")
+
+    return score, reasons
+
+
+def _make_media_item(title, url, summary, published, source_name, source_type, tier, weight):
+    title = _clean_media_text(title)
+    summary = _clean_media_text(summary)
+    source_name = _clean_media_text(source_name or source_type.title())
+    url = (url or "").strip()
+
+    if not title or not url:
+        return None
+
+    if not strict_browns_relevant(title, summary, source_name, url):
+        return None
+
+    score, reasons = _media_score(title, summary, weight, source_type)
+
+    if score < 10:
+        return None
+
+    return {
+        "id": _media_id(title, url),
+        "title": title,
+        "url": url,
+        "source_name": source_name,
+        "source_type": source_type,
+        "source_tier_label": tier,
+        "credibility_score": min(100, max(0, int(weight) * 4)),
+        "domain": _media_domain(url),
+        "category": _media_category(title, summary),
+        "published": published.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "summary": summary[:1500] if summary else "No source summary available.",
+        "score": score,
+        "score_reasons": reasons,
+        "is_new": True,
+    }
+
+
+def _run_ytdlp_search(query, limit=8):
+    import json as _json
+    import subprocess as _subprocess
+
+    cmd = [
+        "yt-dlp",
+        "--dump-json",
+        "--skip-download",
+        "--no-warnings",
+        "--ignore-errors",
+        f"ytsearch{limit}:{query}",
+    ]
+
+    try:
+        proc = _subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    except FileNotFoundError:
+        print("WARNING: yt-dlp is not installed. Skipping YouTube collection.")
+        return []
+    except Exception as exc:
+        print(f"WARNING: YouTube search failed for {query!r}: {exc}")
+        return []
+
+    rows = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(_json.loads(line))
+        except Exception:
+            continue
+
+    return rows
+
+
+def harvest_youtube_links(hours):
+    import datetime as _dt
+
+    cutoff = now_utc() - _dt.timedelta(hours=hours)
+    items = []
+
+    for query in YOUTUBE_BROWNS_SEARCHES:
+        for row in _run_ytdlp_search(query, limit=8):
+            title = row.get("title") or ""
+            url = row.get("webpage_url") or row.get("url") or ""
+
+            if url and not url.startswith("http"):
+                url = f"https://www.youtube.com/watch?v={url}"
+
+            channel = row.get("channel") or row.get("uploader") or "YouTube"
+            desc = row.get("description") or ""
+            published = _media_parse_date(row.get("timestamp") or row.get("upload_date") or row.get("release_timestamp"))
+
+            if published < cutoff:
+                continue
+
+            weight = 14 if _known_browns_source(channel, url) else 8
+            tier = "Browns YouTube" if _known_browns_source(channel, url) else "YouTube"
+
+            item = _make_media_item(
+                title=title,
+                url=url,
+                summary=desc,
+                published=published,
+                source_name=channel,
+                source_type="youtube",
+                tier=tier,
+                weight=weight,
+            )
+
+            if item:
+                items.append(item)
+
+    return items
+
+
+def _itunes_podcast_feeds(search_term, limit=2):
+    import requests as _requests
+    from urllib.parse import quote_plus as _quote_plus
+
+    try:
+        url = f"https://itunes.apple.com/search?media=podcast&limit={limit}&term={_quote_plus(search_term)}"
+        data = _requests.get(url, timeout=20).json()
+    except Exception:
+        return []
+
+    feeds = []
+    for result in data.get("results", []):
+        feed_url = result.get("feedUrl")
+        name = result.get("collectionName") or search_term
+        if feed_url:
+            feeds.append({"name": name, "url": feed_url})
+
+    return feeds
+
+
+def harvest_podcast_links(hours):
+    import datetime as _dt
+    import feedparser as _feedparser
+
+    cutoff = now_utc() - _dt.timedelta(hours=hours)
+    items = []
+    seen_feeds = set()
+
+    feeds = []
+    for term in PODCAST_BROWNS_SEARCHES:
+        feeds.extend(_itunes_podcast_feeds(term, limit=2))
+
+    for feed_meta in feeds:
+        feed_url = feed_meta.get("url", "")
+        podcast_name = _clean_media_text(feed_meta.get("name", "Podcast"))
+
+        if not feed_url or feed_url in seen_feeds:
+            continue
+
+        seen_feeds.add(feed_url)
+
+        try:
+            feed = _feedparser.parse(feed_url)
+        except Exception:
+            continue
+
+        for entry in feed.entries[:12]:
+            published = _media_parse_date(
+                getattr(entry, "published_parsed", None)
+                or getattr(entry, "published", None)
+                or getattr(entry, "updated", None)
+            )
+
+            if published < cutoff:
+                continue
+
+            title = getattr(entry, "title", "")
+            link = getattr(entry, "link", "") or feed_url
+            summary = getattr(entry, "summary", "") or getattr(entry, "description", "")
+
+            weight = 14 if _known_browns_source(podcast_name, link) else 8
+            tier = "Browns Podcast" if _known_browns_source(podcast_name, link) else "Podcast"
+
+            item = _make_media_item(
+                title=title,
+                url=link,
+                summary=summary,
+                published=published,
+                source_name=podcast_name,
+                source_type="podcast",
+                tier=tier,
+                weight=weight,
+            )
+
+            if item:
+                items.append(item)
+
+    return items
+
+
+def _dedupe_and_browns_filter(items):
+    seen = set()
+    output = []
+
+    for item in items:
+        title = item.get("title", "")
+        summary = item.get("summary", "")
+        source_name = item.get("source_name", "")
+        url = item.get("url", "")
+
+        if not strict_browns_relevant(title, summary, source_name, url):
+            continue
+
+        ident = item.get("id") or _media_id(title, url)
+
+        if ident in seen:
+            continue
+
+        seen.add(ident)
+        output.append(item)
+
+    output.sort(key=lambda x: (x.get("score", 0), x.get("published", "")), reverse=True)
+    return output
+
+
+def source_type_counts(items):
+    counts = {"article": 0, "youtube": 0, "podcast": 0}
+
+    for item in items:
+        source_type = item.get("source_type") or "article"
+        counts[source_type] = counts.get(source_type, 0) + 1
+
+    return counts
+
+
+try:
+    _previous_harvest_items = harvest_items
+except NameError:
+    _previous_harvest_items = None
+
+
+def harvest_items(hours):
+    items = []
+
+    if _previous_harvest_items is not None:
+        try:
+            items.extend(_previous_harvest_items(hours))
+        except Exception as exc:
+            print(f"WARNING: existing article harvest failed: {exc}")
+
+    try:
+        items.extend(harvest_youtube_links(hours))
+    except Exception as exc:
+        print(f"WARNING: YouTube harvest failed: {exc}")
+
+    try:
+        items.extend(harvest_podcast_links(hours))
+    except Exception as exc:
+        print(f"WARNING: podcast harvest failed: {exc}")
+
+    return _dedupe_and_browns_filter(items)
+
+
+def grouped_source_notes(items):
+    groups = [
+        ("Articles", [item for item in items if item.get("source_type") == "article"]),
+        ("YouTube", [item for item in items if item.get("source_type") == "youtube"]),
+        ("Podcasts", [item for item in items if item.get("source_type") == "podcast"]),
+    ]
+
+    lines = []
+    source_num = 1
+
+    for group_name, group_items in groups:
+        if not group_items:
+            continue
+
+        lines.append(f"\n## {group_name}\n")
+
+        for item in group_items[:18]:
+            lines.append(
+                f"[{source_num}]\n"
+                f"title: {item.get('title')}\n"
+                f"url: {item.get('url')}\n"
+                f"source_name: {item.get('source_name')}\n"
+                f"source_type: {item.get('source_type')}\n"
+                f"source_tier_label: {item.get('source_tier_label')}\n"
+                f"credibility_score: {item.get('credibility_score')}\n"
+                f"category: {item.get('category')}\n"
+                f"published: {item.get('published')}\n"
+                f"summary: {item.get('summary')}\n"
+            )
+            source_num += 1
+
+            if source_num > 42:
+                return "\n---\n".join(lines)
+
+    return "\n---\n".join(lines)
+
+# --- BROWNS MEDIA COLLECTION OVERRIDE END ---
+
+
 if __name__ == "__main__":
     sys.exit(main())
