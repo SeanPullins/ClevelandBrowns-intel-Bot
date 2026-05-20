@@ -1,0 +1,22 @@
+# Browns Intelligence Command Center Config
+hours: 72
+openrouter_model: "openai/gpt-5.2"
+sources:
+  - name: "Dawg Pound Daily"
+    url: "https://dawgpounddaily.com/posts/index.xml"
+    source_type: "article"
+    source_tier_label: "Tier 2"
+    credibility_score: 75
+    category: "Roster / Analysis"
+  - name: "Browns Nation"
+    url: "https://www.brownsnation.com/feed/"
+    source_type: "article"
+    source_tier_label: "Tier 2"
+    credibility_score: 70
+    category: "General News"
+  - name: "Official Browns News"
+    url: "https://www.clevelandbrowns.com/rss/news"
+    source_type: "official"
+    source_tier_label: "Tier 1"
+    credibility_score: 95
+    category: "Roster / Coaching"
