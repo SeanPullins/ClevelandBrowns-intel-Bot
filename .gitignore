@@ -7,3 +7,12 @@ coverage/
 .env*
 !.env.example
 .env
+
+# Local/cache/backup files
+__pycache__/
+*.pyc
+.env
+logs/
+data/
+browns_intel_bot.backup.fake.py
+src/App.backup.fake.tsx
