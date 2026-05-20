@@ -1,6 +1,15 @@
 {
   "reports": [
     {
+      "path": "archive/report_20260520_003322.json",
+      "generated_at": "2026-05-20 00:33:22 UTC",
+      "item_count": 92,
+      "new_count": 92,
+      "ai_provider": "openrouter",
+      "ai_provider_status": "ok",
+      "ai_model": "openai/gpt-5.2"
+    },
+    {
       "path": "archive/report_20260520_002923.json",
       "generated_at": "2026-05-20 00:29:23 UTC",
       "item_count": 90,
