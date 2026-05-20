@@ -38,12 +38,12 @@ export default function App() {
     setError(null);
 
     try {
-      const res = await fetch(`/latest.json?ts=${Date.now()}`, {
+      const res = await fetch(`${import.meta.env.BASE_URL}latest.json?ts=${Date.now()}`, {
         cache: "no-store",
       });
 
       if (!res.ok) {
-        throw new Error(`Could not load /latest.json. HTTP ${res.status}`);
+        throw new Error(`Could not load latest.json from deployed base path. HTTP ${res.status}`);
       }
 
       const data = await res.json();
