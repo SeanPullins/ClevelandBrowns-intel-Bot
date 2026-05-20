@@ -1,396 +1,467 @@
 #!/usr/bin/env python3
-import os
-import sys
+from __future__ import annotations
+
 import argparse
-import datetime
+import datetime as dt
+import hashlib
+import html
 import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any, Dict, List
+from urllib.parse import quote_plus, urlparse
+
+import feedparser
 import requests
 import yaml
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-# Load .env near startup
 load_dotenv()
 
-def call_openrouter(messages, model=None, temperature=0.2, max_tokens=3500, timeout=120):
-    """
-    Calls OpenRouter chat completions API.
-    Returns:
+ROOT = Path(__file__).resolve().parent
+PUBLIC_DIR = ROOT / "public"
+DOCS_DIR = ROOT / "docs"
+PUBLIC_ARCHIVE = PUBLIC_DIR / "archive"
+DOCS_ARCHIVE = DOCS_DIR / "archive"
+CONFIG_PATH = ROOT / "config.yaml"
+
+DEFAULT_MODEL = "openai/gpt-5.2"
+DEFAULT_REFERER = "https://seanpullins.github.io/ClevenadBrowns-intel-Bot/"
+DEFAULT_TITLE = "Browns Intelligence Command Center"
+
+SOURCE_FEEDS = [
     {
-      "ok": bool,
-      "content": str,
-      "model": str,
-      "status": "ok|missing_api_key|openrouter_error"
-    }
-    """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+        "name": "Official Browns News",
+        "url": "https://news.google.com/rss/search?q=site%3Aclevelandbrowns.com%2Fnews%20%22Cleveland%20Browns%22%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 1 Official",
+        "weight": 25,
+    },
+    {
+        "name": "NFL.com Browns",
+        "url": "https://news.google.com/rss/search?q=site%3Anfl.com%20%22Cleveland%20Browns%22%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 1 League",
+        "weight": 22,
+    },
+    {
+        "name": "ESPN Browns",
+        "url": "https://news.google.com/rss/search?q=site%3Aespn.com%20%22Cleveland%20Browns%22%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 2 Reporting",
+        "weight": 18,
+    },
+    {
+        "name": "Cleveland.com Browns",
+        "url": "https://news.google.com/rss/search?q=site%3Acleveland.com%2Fbrowns%20Browns%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 2 Local Reporting",
+        "weight": 18,
+    },
+    {
+        "name": "Akron Beacon Journal Browns",
+        "url": "https://news.google.com/rss/search?q=site%3Abeaconjournal.com%20%22Cleveland%20Browns%22%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 2 Local Reporting",
+        "weight": 16,
+    },
+    {
+        "name": "News 5 Cleveland Browns",
+        "url": "https://news.google.com/rss/search?q=site%3Anews5cleveland.com%2Fsports%2Fbrowns%20Browns%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 2 Local Reporting",
+        "weight": 16,
+    },
+    {
+        "name": "WKYC Browns",
+        "url": "https://news.google.com/rss/search?q=site%3Awkyc.com%20%22Cleveland%20Browns%22%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 2 Local Reporting",
+        "weight": 16,
+    },
+    {
+        "name": "Pro Football Talk Browns",
+        "url": "https://news.google.com/rss/search?q=site%3Anbcsports.com%2Fnfl%2Fprofootballtalk%20%22Cleveland%20Browns%22%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 2 National Reporting",
+        "weight": 16,
+    },
+    {
+        "name": "Dawgs By Nature",
+        "url": "https://www.dawgsbynature.com/rss/current.xml",
+        "tier": "Tier 3 Browns Analysis",
+        "weight": 10,
+    },
+    {
+        "name": "Browns Wire",
+        "url": "https://news.google.com/rss/search?q=site%3Abrownswire.usatoday.com%20Browns%20when%3A7d&hl=en-US&gl=US&ceid=US:en",
+        "tier": "Tier 3 Browns Analysis",
+        "weight": 10,
+    },
+]
+
+CATEGORIES = {
+    "QB Room": ["quarterback", " qb ", "flacco", "pickett", "gabriel", "shedeur", "watson"],
+    "Draft Intel": ["draft", "prospect", "mock", "combine", "senior bowl", "top 30", "visit"],
+    "Roster / Injury": ["injury", "injured", "roster", "signed", "waived", "released", "trade", "contract"],
+    "Front Office / Coaching": ["andrew berry", "kevin stefanski", "coach", "coordinator", "haslam"],
+    "Betting / Market": ["odds", "spread", "win total", "betting", "futures"],
+    "Offense": ["offense", "receiver", "running back", "tight end", "offensive line", "tackle"],
+    "Defense": ["defense", "myles garrett", "cornerback", "linebacker", "edge", "safety"],
+}
+
+PRIORITY_TERMS = [
+    "cleveland browns",
+    "browns",
+    "quarterback",
+    "injury",
+    "trade",
+    "draft",
+    "andrew berry",
+    "kevin stefanski",
+    "myles garrett",
+    "shedeur",
+    "dillon gabriel",
+]
+
+NOISE_TERMS = [
+    "bold prediction",
+    "trade proposal",
+    "dream scenario",
+    "way-too-early",
+    "fan proposal",
+]
+
+
+def clean_text(value: str) -> str:
+    value = html.unescape(value or "")
+    value = BeautifulSoup(value, "html.parser").get_text(" ", strip=True)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def now_utc() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_date(value: Any) -> dt.datetime:
+    if not value:
+        return now_utc()
+    try:
+        parsed = dt.datetime(*value[:6], tzinfo=dt.timezone.utc) if isinstance(value, tuple) else None
+        if parsed:
+            return parsed
+    except Exception:
+        pass
+    try:
+        from dateutil import parser as date_parser
+        parsed = date_parser.parse(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    except Exception:
+        return now_utc()
+
+
+def item_id(title: str, url: str) -> str:
+    raw = f"{title.lower()}|{urlparse(url).netloc}{urlparse(url).path}".encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def category_for(text: str) -> str:
+    low = f" {text.lower()} "
+    best = "General Browns"
+    best_score = 0
+    for cat, terms in CATEGORIES.items():
+        score = sum(1 for t in terms if t in low)
+        if score > best_score:
+            best = cat
+            best_score = score
+    return best
+
+
+def score_item(title: str, summary: str, source_weight: int) -> tuple[int, List[str]]:
+    low = f" {title} {summary} ".lower()
+    score = source_weight
+    reasons = [f"source_weight +{source_weight}"]
+
+    for term in PRIORITY_TERMS:
+        if term in low:
+            add = 8 if term in title.lower() else 3
+            score += add
+            reasons.append(f"{term} +{add}")
+
+    for term in NOISE_TERMS:
+        if term in low:
+            score -= 8
+            reasons.append(f"{term} -8")
+
+    return score, reasons
+
+
+def load_config() -> Dict[str, Any]:
+    if CONFIG_PATH.exists():
+        try:
+            return yaml.safe_load(CONFIG_PATH.read_text()) or {}
+        except Exception:
+            return {}
+    return {}
+
+
+def harvest_items(hours: int) -> List[Dict[str, Any]]:
+    cutoff = now_utc() - dt.timedelta(hours=hours)
+    items: List[Dict[str, Any]] = []
+    seen = set()
+
+    for source in SOURCE_FEEDS:
+        feed = feedparser.parse(source["url"])
+        for entry in feed.entries[:25]:
+            title = clean_text(getattr(entry, "title", ""))
+            url = getattr(entry, "link", "")
+            summary = clean_text(getattr(entry, "summary", "")) or clean_text(getattr(entry, "description", ""))
+            published = parse_date(getattr(entry, "published_parsed", None) or getattr(entry, "published", None) or getattr(entry, "updated", None))
+
+            if not title or not url:
+                continue
+            if published < cutoff:
+                continue
+
+            ident = item_id(title, url)
+            if ident in seen:
+                continue
+            seen.add(ident)
+
+            combined = f"{title} {summary}"
+            score, reasons = score_item(title, summary, int(source["weight"]))
+
+            if score < 10:
+                continue
+
+            domain = urlparse(url).netloc.replace("www.", "")
+
+            items.append({
+                "id": ident,
+                "title": title,
+                "url": url,
+                "source_name": source["name"],
+                "source_type": "article",
+                "source_tier_label": source["tier"],
+                "credibility_score": min(100, max(0, int(source["weight"]) * 4)),
+                "domain": domain,
+                "category": category_for(combined),
+                "published": published.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "summary": summary[:1200] if summary else "No source summary available.",
+                "score": score,
+                "score_reasons": reasons,
+                "is_new": True,
+            })
+
+    items.sort(key=lambda x: (x["score"], x["published"]), reverse=True)
+    return items
+
+
+def fallback_brief(items: List[Dict[str, Any]], hours: int, status: str) -> str:
+    if not items:
+        return (
+            "# Executive Brief\n"
+            f"No real Browns source items were collected in the latest {hours}-hour run.\n\n"
+            "# Strong Signals\n"
+            "No real source-backed strong signals available.\n\n"
+            "# Developing Signals\n"
+            "No real source-backed developing signals available.\n\n"
+            "# Noise / Low-Confidence Chatter\n"
+            "No fake or fallback rumor items were generated.\n\n"
+            "# Watch List\n"
+            "Check source configuration, network access, and feed availability."
+        )
+
+    lines = [
+        "# Executive Brief",
+        f"Collected {len(items)} real Browns-related public source items over the latest {hours} hours.",
+        f"AI provider status: {status}. This is a non-AI fallback brief generated from real source cards only.",
+        "",
+        "# Strong Signals",
+    ]
+
+    for i, item in enumerate(items[:8], 1):
+        lines.append(f"- [{i}] {item['title']} — {item['source_name']} ({item['source_tier_label']})")
+
+    lines += [
+        "",
+        "# Watch List",
+        "- Re-run with OpenRouter enabled for deeper source-grounded synthesis.",
+        "- Verify source links before treating any item as confirmed.",
+    ]
+    return "\n".join(lines)
+
+
+def call_openrouter(messages, model=None, temperature=0.2, max_tokens=3500, timeout=120):
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    selected_model = model or os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
+
     if not api_key:
-        return {
-            "ok": False,
-            "content": "",
-            "model": model or "unknown_model",
-            "status": "missing_api_key"
-        }
-    
-    selected_model = model or os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.2")
-    referer = os.environ.get("OPENROUTER_REFERER", "https://seanpullins.github.io/browns-intel-bot/")
-    app_title = os.environ.get("OPENROUTER_APP_TITLE", "Browns Intelligence Command Center")
-    
+        return {"ok": False, "content": "", "model": selected_model, "status": "missing_api_key"}
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": referer,
-        "X-OpenRouter-Title": app_title
+        "HTTP-Referer": os.getenv("OPENROUTER_REFERER", DEFAULT_REFERER),
+        "X-OpenRouter-Title": os.getenv("OPENROUTER_APP_TITLE", DEFAULT_TITLE),
     }
-    
+
     payload = {
         "model": selected_model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens
+        "max_tokens": max_tokens,
     }
-    
+
     try:
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=timeout
-        )
-        if response.status_code == 200:
-            data = response.json()
-            try:
-                content = data["choices"][0]["message"]["content"]
-                return {
-                    "ok": True,
-                    "content": content,
-                    "model": selected_model,
-                    "status": "ok"
-                }
-            except (KeyError, IndexError, TypeError):
-                return {
-                    "ok": False,
-                    "content": "",
-                    "model": selected_model,
-                    "status": "openrouter_error"
-                }
-        else:
-            return {
-                "ok": False,
-                "content": "",
-                "model": selected_model,
-                "status": "openrouter_error"
-            }
+        res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=timeout)
+        if not res.ok:
+            return {"ok": False, "content": "", "model": selected_model, "status": "openrouter_error"}
+        data = res.json()
+        content = data["choices"][0]["message"]["content"]
+        return {"ok": True, "content": content, "model": selected_model, "status": "ok"}
     except Exception:
-        return {
-            "ok": False,
-            "content": "",
-            "model": selected_model,
-            "status": "openrouter_error"
-        }
+        return {"ok": False, "content": "", "model": selected_model, "status": "openrouter_error"}
 
-def test_openrouter_connection():
-    """
-    Sends a tiny test request:
-    'Say: OpenRouter connected for Browns bot.'
-    Prints success or failure.
-    Does not print API key.
-    """
-    print("\n=== Testing OpenRouter Connection ===")
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if api_key:
-        masked_key = api_key[:4] + "..." + api_key[-4:] if len(api_key) > 8 else "CONFIGURED_SHORT"
-        print(f"Info: OPENROUTER_API_KEY is configured as: {masked_key}")
-    else:
-        print("Warning: OPENROUTER_API_KEY is missing or empty in the environment.")
-        
-    messages = [
-        {"role": "user", "content": "Say: OpenRouter connected for Browns bot."}
-    ]
-    
-    res = call_openrouter(messages)
-    if res["ok"]:
-        print("\nSUCCESS: OpenRouter connection test succeeded!")
-        print(f"Model used: {res['model']}")
-        print(f"Response: {res['content'].strip()}")
-    else:
-        print(f"\nFAILURE: OpenRouter connection test failed. Status: {res['status']}")
-    print("=====================================\n")
 
-def get_fallback_brief(items, hours):
-    now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    
-    brief = f"""# Executive Brief
-This is a source-grounded Cleveland Browns intelligence brief compiled dynamically at {now_str} covering the last {hours} hours.
-Note: Dynamic AI summary feature was either skipped or returned an error status. Showing localized heuristic update.
+def make_ai_brief(items: List[Dict[str, Any]], hours: int, skip_ai: bool):
+    model = os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
 
-# Strong Signals
-- Collected {len(items)} public feeds tracking Browns roster activity, coaching signals, and speculation.
+    if skip_ai:
+        return fallback_brief(items, hours, "skipped"), "skipped", model
 
-# Developing Signals
-- General monitoring of front office roster cuts and potential additions.
-
-# Noise / Low-Confidence Chatter
-- Continuous fan blog conjecture surrounding potential veteran trades.
-
-# QB Room Movement
-- Analyzing Browns quarterback roster configurations. No official modifications were reported in the harvested timeline.
-
-# Roster / Injury Movement
-- Tracking standard rehab timelines and pre-camp fitness indicators.
-
-# Draft Intel
-- Scouting network logs and consensus draft boards updated internally.
-
-# Front Office / Coaching
-- Front office executives are actively sizing up league-wide waiver priorities.
-
-# Market / Betting Implications
-- Futures markets and division odds remain stable.
-
-# What Changed Since Last Run
-- Parsed and analyzed {len(items)} newly compiled timeline sources.
-
-# Watch List
-- Direct beat reporting and primary tier-1 team statements.
-
-# Questions for Tomorrow
-- Which bubble roster candidates will secure final positions?
-"""
-    return brief
-
-def make_ai_brief_openrouter(items, cfg, hours, previous_context=None):
-    """
-    Creates a detailed Browns intelligence brief using OpenRouter.
-    If OpenRouter fails, returns fallback brief and provider status.
-    """
     if not items:
-        # No items to summarize, return a default empty report template
-        return get_fallback_brief([], hours), "fallback", "none"
-        
+        return fallback_brief([], hours, "fallback"), "fallback", model
+
     source_notes = []
-    for i, item in enumerate(items, 1):
-        note_str = f"[{i}]\n"
-        note_str += f"title: {item.get('title', 'N/A')}\n"
-        note_str += f"url: {item.get('url', 'N/A')}\n"
-        note_str += f"source_name: {item.get('source_name', 'N/A')}\n"
-        note_str += f"source_type: {item.get('source_type', 'N/A')}\n"
-        if 'source_tier_label' in item:
-            note_str += f"source_tier_label: {item['source_tier_label']}\n"
-        if 'credibility_score' in item:
-            note_str += f"credibility_score: {item['credibility_score']}\n"
-        note_str += f"category: {item.get('category', 'N/A')}\n"
-        note_str += f"published: {item.get('published', 'N/A')}\n"
-        snippet = item.get('summary', item.get('snippet', 'N/A'))
-        note_str += f"summary/snippet: {snippet}\n"
-        source_notes.append(note_str)
-        
-    source_text = "\n---\n".join(source_notes)
-    
-    system_msg = (
-        "You are Sean's Cleveland Browns intelligence analyst. Produce a source-grounded Browns "
-        "intelligence briefing from collected public articles, podcasts, and YouTube transcripts/snippets. "
-        "Do not invent facts. Separate confirmed reporting from opinion/speculation. Treat official/team "
-        "and established reporting as strongest. Treat reputable analysis as useful but not confirmation. "
-        "Treat podcasts/video as commentary unless direct reporting is included. Treat fan chatter/rumor "
-        "aggregation as noise unless independently supported by credible sources. Focus on QB room, "
-        "roster/injury, draft intel, front office/coaching, and betting/market implications."
-    )
-    
-    user_msg = f"Create a detailed Browns Intelligence Report using only the source notes below.\n\nSources:\n{source_text}"
-    
+    for i, item in enumerate(items[:35], 1):
+        source_notes.append(
+            f"[{i}]\n"
+            f"title: {item['title']}\n"
+            f"url: {item['url']}\n"
+            f"source_name: {item['source_name']}\n"
+            f"source_type: {item['source_type']}\n"
+            f"source_tier_label: {item['source_tier_label']}\n"
+            f"credibility_score: {item['credibility_score']}\n"
+            f"category: {item['category']}\n"
+            f"published: {item['published']}\n"
+            f"summary: {item['summary']}\n"
+        )
+
     messages = [
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg}
-    ]
-    
-    # Extract model configuration
-    configured_model = None
-    if cfg:
-        configured_model = cfg.get("openrouter_model")
-    if not configured_model:
-        configured_model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.2")
-        
-    res = call_openrouter(messages, model=configured_model)
-    
-    if res["ok"]:
-        return res["content"], res["status"], res["model"]
-    else:
-        # Fallback brief
-        fallback = get_fallback_brief(items, hours)
-        return fallback, res["status"], res["model"]
-
-def harvest_items(cfg, hours):
-    """
-    Gathers news items from configured sources.
-    Falls back to generated high quality mock elements to keep runs robust.
-    """
-    items = []
-    
-    # Mock items to ensure there's always valid feed details
-    now = datetime.datetime.utcnow()
-    mock_items = [
         {
-            "title": "Cleveland Browns Roster Structuring: Quarterback Dynamic Evaluated",
-            "url": "https://www.clevelandbrowns.com/news/roster-structuring-qb-dynamic",
-            "source_name": "Official Browns News",
-            "source_type": "official",
-            "source_tier_label": "Tier 1",
-            "credibility_score": 95,
-            "category": "Roster / Coaching",
-            "published": (now - datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S UTC"),
-            "summary": "Front office confirms standard active reps distribution across the entire QB room. Focus remains on tactical integration during the upcoming phase.",
-            "snippet": "Front office confirms standard active reps distribution across the entire QB room. Focus remains on tactical integration during the upcoming phase."
+            "role": "system",
+            "content": (
+                "You are Sean's Cleveland Browns intelligence analyst. Produce a source-grounded Browns "
+                "intelligence briefing from collected public articles. Do not invent facts. Separate confirmed "
+                "reporting from opinion/speculation. Treat official/team and established reporting as strongest. "
+                "Use source numbers like [1], [2]. If the data is thin, say so."
+            ),
         },
         {
-            "title": "Unpacking New Offensive Line Signals from Browns Open Workouts",
-            "url": "https://dawgpounddaily.com/posts/offensive-line-signals-workouts",
-            "source_name": "Dawg Pound Daily",
-            "source_type": "article",
-            "source_tier_label": "Tier 2",
-            "credibility_score": 75,
-            "category": "Roster / Analysis",
-            "published": (now - datetime.timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S UTC"),
-            "summary": "Observation indicates offensive coaches are implementing variable pre-snap checks. Reps for younger depth candidates increased today.",
-            "snippet": "Observation indicates offensive coaches are implementing variable pre-snap checks. Reps for younger depth candidates increased today."
+            "role": "user",
+            "content": (
+                "Create a detailed Browns Intelligence Report using only the source notes below.\n\n"
+                "Required sections:\n"
+                "# Executive Brief\n# Strong Signals\n# Developing Signals\n# Noise / Low-Confidence Chatter\n"
+                "# QB Room Movement\n# Roster / Injury Movement\n# Draft Intel\n# Front Office / Coaching\n"
+                "# Market / Betting Implications\n# What Changed Since Last Run\n# Watch List\n# Questions for Tomorrow\n\n"
+                + "\n---\n".join(source_notes)
+            ),
         },
-        {
-            "title": "Evaluating Pre-Draft Visit Schedules: Browns Eye Defensive Line Prospects",
-            "url": "https://www.brownsnation.com/evaluating-visit-schedules-defensive-line",
-            "source_name": "Browns Nation",
-            "source_type": "article",
-            "source_tier_label": "Tier 2",
-            "credibility_score": 70,
-            "category": "General News",
-            "published": (now - datetime.timedelta(hours=10)).strftime("%Y-%m-%d %H:%M:%S UTC"),
-            "summary": "Scouting network logs suggest visiting lists highlight premium prospects. Analysts discuss betting market shifts matching defensive draft positions.",
-            "snippet": "Scouting network logs suggest visiting lists highlight premium prospects. Analysts discuss betting market shifts matching defensive draft positions."
-        }
     ]
-    
-    # Try parsing configured items as well
-    if cfg and "sources" in cfg:
-        try:
-            import feedparser
-            for src in cfg["sources"]:
-                feed_url = src.get("url")
-                if feed_url:
-                    # Parse feed, but keep it robust with a short timeout
-                    feed = feedparser.parse(feed_url)
-                    for entry in feed.entries[:2]: # grab top 2
-                        published_str = getattr(entry, "published", now.strftime("%Y-%m-%d %H:%M:%S UTC"))
-                        items.append({
-                            "title": entry.get("title", "Untitled Feed Post"),
-                            "url": entry.get("link", feed_url),
-                            "source_name": src.get("name", "Unknown Feed"),
-                            "source_type": src.get("source_type", "article"),
-                            "source_tier_label": src.get("source_tier_label", "Tier 2"),
-                            "credibility_score": src.get("credibility_score", 70),
-                            "category": src.get("category", "General News"),
-                            "published": published_str,
-                            "summary": entry.get("summary", "Feed item summary unavailable."),
-                            "snippet": entry.get("description", entry.get("summary", "Feed item snippet unavailable."))
-                        })
-        except Exception as e:
-            # Silently fallback to mock_items if feedparser is missing or network fails
-            pass
-            
-    if not items:
-        items = mock_items
-        
-    return items
 
-def main():
-    parser = argparse.ArgumentParser(description="Browns Intelligence Command Center Bot")
-    parser.add_argument("--hours", type=int, default=12, help="Hours of timeline history to aggregate")
-    parser.add_argument("--skip-ai", action="store_true", help="Do not call OpenRouter, use fallback brief")
-    parser.add_argument("--test-openrouter", action="store_true", help="Send a small connection test to OpenRouter and exit")
-    parser.add_argument("--memory-stats", action="store_true", help="Print simple memory/source stats info and exit")
-    
+    result = call_openrouter(messages, model=model)
+    if result["ok"]:
+        return result["content"], result["status"], result["model"]
+
+    return fallback_brief(items, hours, result["status"]), result["status"], result["model"]
+
+
+def write_json_outputs(output: Dict[str, Any]) -> None:
+    for folder in [PUBLIC_DIR, DOCS_DIR, PUBLIC_ARCHIVE, DOCS_ARCHIVE]:
+        folder.mkdir(parents=True, exist_ok=True)
+
+    for path in [PUBLIC_DIR / "latest.json", DOCS_DIR / "latest.json"]:
+        path.write_text(json.dumps(output, indent=2), encoding="utf-8")
+
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    archive_name = f"report_{stamp}.json"
+
+    for archive_dir in [PUBLIC_ARCHIVE, DOCS_ARCHIVE]:
+        archive_path = archive_dir / archive_name
+        archive_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
+
+        index_path = archive_dir / "index.json"
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text())
+            except Exception:
+                index = {"reports": []}
+        else:
+            index = {"reports": []}
+
+        rel_path = f"archive/{archive_name}"
+        index["reports"] = [
+            {
+                "path": rel_path,
+                "generated_at": output["generated_at"],
+                "item_count": len(output["items"]),
+                "new_count": sum(1 for item in output["items"] if item.get("is_new")),
+                "ai_provider": output["ai_provider"],
+                "ai_provider_status": output["ai_provider_status"],
+                "ai_model": output["ai_model"],
+            }
+        ] + [r for r in index.get("reports", []) if r.get("path") != rel_path]
+
+        index["reports"] = index["reports"][:50]
+        index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+
+
+def test_openrouter_connection() -> int:
+    result = call_openrouter([{"role": "user", "content": "Say: OpenRouter connected for Browns bot."}], max_tokens=50)
+    if result["ok"]:
+        print("SUCCESS: OpenRouter connected.")
+        print(f"Model: {result['model']}")
+        print(result["content"])
+        return 0
+    print(f"FAILURE: {result['status']}")
+    return 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Browns Intelligence Bot")
+    parser.add_argument("--hours", type=int, default=72)
+    parser.add_argument("--skip-ai", action="store_true")
+    parser.add_argument("--test-openrouter", action="store_true")
+    parser.add_argument("--memory-stats", action="store_true")
     args = parser.parse_args()
-    
+
     if args.test_openrouter:
-        test_openrouter_connection()
-        return 0
-        
+        return test_openrouter_connection()
+
     if args.memory_stats:
-        print("\n=== Memory / Source Database Stats ===")
-        print("Note: In-memory tracker configured.")
-        print("Active tracker size: 3 registered crawl channels")
-        print("No disk database (sqlite/memorydb) initialized on this preview run.")
-        print("======================================\n")
+        print("Memory database is not enabled in this no-mock build.")
         return 0
-        
-    # Read core configurations
-    cfg = {}
-    if os.path.exists("config.yaml"):
-        try:
-            with open("config.yaml", "r") as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception as e:
-            print(f"Warning loading config.yaml: {e}")
-            
-    hours = args.hours
-    print(f"Executing Browns Intelligence Report compiler for trailing {hours} hours...")
-    
-    # Collect timeline information
-    items = harvest_items(cfg, hours)
-    print(f"Aggregated {len(items)} intel items successfully.")
-    
-    # Determine summary approach
-    configured_model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.2")
-    if cfg and "openrouter_model" in cfg:
-        configured_model = cfg["openrouter_model"]
-        
-    if args.skip_ai:
-        print("Heuristic summary selected (--skip-ai). Skipping remote intelligence call.")
-        ai_brief = get_fallback_brief(items, hours)
-        provider = "openrouter"
-        provider_status = "skipped"
-        model_used = configured_model
-    else:
-        print(f"Calling OpenRouter summary builder with model: {configured_model}...")
-        ai_brief, provider_status, model_used = make_ai_brief_openrouter(items, cfg, hours)
-        provider = "openrouter"
-        print(f"Completion returned status: {provider_status}")
-        
-    # Standard output composition
-    output_obj = {
-        "generated_at": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "hours": hours,
-        "ai_provider": provider,
-        "ai_provider_status": provider_status,
-        "ai_model": model_used,
+
+    items = harvest_items(args.hours)
+    ai_brief, status, model = make_ai_brief(items, args.hours, args.skip_ai)
+
+    output = {
+        "generated_at": now_utc().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "hours": args.hours,
+        "ai_provider": "openrouter",
+        "ai_provider_status": status,
+        "ai_model": model,
         "ai_brief": ai_brief,
-        "items": items
+        "items": items,
     }
-    
-    # Ensure directories exist
-    os.makedirs("docs", exist_ok=True)
-    os.makedirs("docs/archive", exist_ok=True)
-    
-    # Write docs/latest.json
-    latest_path = "docs/latest.json"
-    try:
-        with open(latest_path, "w") as f:
-            json.dump(output_obj, f, indent=2)
-        print(f"Report written down to: {latest_path}")
-    except Exception as e:
-        print(f"Error writing to {latest_path}: {e}")
-        return 1
-        
-    # Write historical archive file
-    timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    archive_path = f"docs/archive/{timestamp}.json"
-    try:
-        with open(archive_path, "w") as f:
-            json.dump(output_obj, f, indent=2)
-        print(f"Historical entry archived to: {archive_path}")
-    except Exception as e:
-        print(f"Error writing to {archive_path}: {e}")
-        return 1
-        
-    print("Execution complete!")
+
+    write_json_outputs(output)
+
+    print(f"Latest JSON: {PUBLIC_DIR / 'latest.json'}")
+    print(f"Docs mirror: {DOCS_DIR / 'latest.json'}")
+    print(f"Items collected: {len(items)}")
+    print(f"AI status: {status}")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
