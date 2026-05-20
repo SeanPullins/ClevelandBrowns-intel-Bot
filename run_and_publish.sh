@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd "$HOME/ClevenadBrowns-intel-Bot" || exit 1
+cd "$HOME/ClevelandBrowns-intel-Bot" || exit 1
 
 source .venv/bin/activate
 

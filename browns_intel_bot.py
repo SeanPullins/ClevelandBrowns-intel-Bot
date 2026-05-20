@@ -29,7 +29,7 @@ DOCS_ARCHIVE = DOCS_DIR / "archive"
 CONFIG_PATH = ROOT / "config.yaml"
 
 DEFAULT_MODEL = "openai/gpt-5.2"
-DEFAULT_REFERER = "https://seanpullins.github.io/ClevenadBrowns-intel-Bot/"
+DEFAULT_REFERER = "https://seanpullins.github.io/ClevelandBrowns-intel-Bot/"
 DEFAULT_TITLE = "Browns Intelligence Command Center"
 
 SOURCE_FEEDS = [
