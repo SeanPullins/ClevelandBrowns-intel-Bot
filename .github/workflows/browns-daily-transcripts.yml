@@ -1,0 +1,39 @@
+name: Browns Daily Transcript Feed
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 5:30 PM America/New_York during daylight saving time.
+    # GitHub Actions cron runs in UTC. Adjust to 22:30 UTC during standard time if exact winter timing matters.
+    - cron: "30 21 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  update-transcript-feed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-transcripts.txt
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-transcripts.txt
+
+      - name: Update Browns Daily Google Doc
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_DOC_ID: ${{ secrets.GOOGLE_DOC_ID }}
+          BROWNS_YOUTUBE_CHANNEL_URL: "https://www.youtube.com/@browns/videos"
+          MAX_BROWNS_DAILY_VIDEOS: "5"
+          TRANSCRIPT_LANGUAGES: "en,en-US,en-orig"
+        run: python scripts/update_browns_daily_doc.py
