@@ -11,6 +11,7 @@ Optional environment variables:
   BROWNS_YOUTUBE_CHANNEL_URL   Defaults to https://www.youtube.com/@browns/videos
   MAX_BROWNS_DAILY_VIDEOS      Defaults to 5
   TRANSCRIPT_LANGUAGES         Defaults to en,en-US,en-orig
+  YOUTUBE_COOKIES              Netscape-format YouTube cookies text, optional but useful when YouTube blocks GitHub Actions
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ MAX_VIDEOS = int(os.getenv("MAX_BROWNS_DAILY_VIDEOS", "5"))
 TRANSCRIPT_LANGUAGES = [lang.strip() for lang in os.getenv("TRANSCRIPT_LANGUAGES", "en,en-US,en-orig").split(",") if lang.strip()]
 DOC_ID = os.getenv("GOOGLE_DOC_ID")
 SERVICE_ACCOUNT_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+YOUTUBE_COOKIES_ENV = os.getenv("YOUTUBE_COOKIES", "").strip()
 
 # The channel videos page sometimes misses podcasts/live uploads in yt-dlp flat mode.
 # These fallbacks search YouTube directly, then we still filter titles/uploader before using them.
@@ -58,6 +60,8 @@ ALLOWED_UPLOADER_WORDS = (
 )
 
 SCOPES = ["https://www.googleapis.com/auth/documents"]
+
+_COOKIE_FILE: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,43 @@ def load_service_account_info() -> dict:
         return json.loads(decoded)
     except Exception as exc:  # noqa: BLE001
         fail(f"GOOGLE_SERVICE_ACCOUNT_JSON is neither raw JSON nor base64 JSON: {exc}")
+
+
+def get_cookie_file() -> str | None:
+    """Write optional YouTube cookies secret to a temporary Netscape cookies file."""
+    global _COOKIE_FILE
+    if not YOUTUBE_COOKIES_ENV:
+        return None
+    if _COOKIE_FILE and _COOKIE_FILE.exists():
+        return str(_COOKIE_FILE)
+
+    raw = YOUTUBE_COOKIES_ENV
+    # Allow either raw Netscape cookies text or base64-encoded cookies text.
+    if not raw.startswith("# Netscape") and "youtube.com" not in raw.lower():
+        try:
+            decoded = base64.b64decode(raw).decode("utf-8")
+            if "youtube.com" in decoded.lower() or decoded.startswith("# Netscape"):
+                raw = decoded
+        except Exception:
+            pass
+
+    cookie_path = Path(tempfile.gettempdir()) / "youtube-cookies.txt"
+    cookie_path.write_text(raw.rstrip() + "\n", encoding="utf-8")
+    try:
+        cookie_path.chmod(0o600)
+    except Exception:
+        pass
+    _COOKIE_FILE = cookie_path
+    log("Using YouTube cookies from YOUTUBE_COOKIES secret.")
+    return str(cookie_path)
+
+
+def yt_dlp_base_opts() -> dict:
+    opts: dict = {}
+    cookie_file = get_cookie_file()
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    return opts
 
 
 def youtube_watch_url(video_id: str | None, fallback_url: str | None = None) -> str:
@@ -158,6 +199,7 @@ def video_from_entry(entry: dict) -> Video | None:
 
 def collect_entries(source: str, *, playlistend: int | None = None) -> list[dict]:
     opts = {
+        **yt_dlp_base_opts(),
         "quiet": True,
         "extract_flat": "in_playlist",
         "skip_download": True,
@@ -232,6 +274,7 @@ def download_subtitle(video: Video, *, auto: bool) -> Path | None:
         tmpdir = Path(tmpdir_str)
         outtmpl = str(tmpdir / "%(id)s.%(ext)s")
         opts = {
+            **yt_dlp_base_opts(),
             "quiet": True,
             "skip_download": True,
             "writesubtitles": not auto,
@@ -349,7 +392,7 @@ def build_document(transcripts: Iterable[Transcript]) -> str:
             "",
             "No Browns Daily captions were found during this run.",
             "",
-            "Troubleshooting note: The GitHub job could edit this document, but it did not find usable YouTube captions. Check the workflow logs for matched titles and caption-download messages.",
+            "Troubleshooting note: The GitHub job could edit this document, but it did not find usable YouTube captions. Check the workflow logs for matched titles and caption-download messages. If the log says YouTube wants sign-in or bot confirmation, add the YOUTUBE_COOKIES repository secret.",
             "",
         ])
         return "\n".join(parts)
