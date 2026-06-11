@@ -36,9 +36,25 @@ TRANSCRIPT_LANGUAGES = [lang.strip() for lang in os.getenv("TRANSCRIPT_LANGUAGES
 DOC_ID = os.getenv("GOOGLE_DOC_ID")
 SERVICE_ACCOUNT_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
+# The channel videos page sometimes misses podcasts/live uploads in yt-dlp flat mode.
+# These fallbacks search YouTube directly, then we still filter titles/uploader before using them.
+SEARCH_QUERIES = [
+    query.strip()
+    for query in os.getenv(
+        "BROWNS_DAILY_SEARCH_QUERIES",
+        "ytsearchdate30:Cleveland Browns Daily Cleveland Browns,ytsearchdate30:Browns Daily Nathan Zegura Beau Bishop,ytsearchdate30:site:youtube.com Cleveland Browns Daily Browns",
+    ).split(",")
+    if query.strip()
+]
+
 TITLE_PATTERNS = (
     "cleveland browns daily",
     "browns daily",
+)
+
+ALLOWED_UPLOADER_WORDS = (
+    "cleveland browns",
+    "browns",
 )
 
 SCOPES = ["https://www.googleapis.com/auth/documents"]
@@ -50,6 +66,7 @@ class Video:
     url: str
     video_id: str
     upload_date: str | None = None
+    uploader: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,8 +102,12 @@ def load_service_account_info() -> dict:
 
 
 def youtube_watch_url(video_id: str | None, fallback_url: str | None = None) -> str:
-    if video_id:
+    if video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         return f"https://www.youtube.com/watch?v={video_id}"
+    if fallback_url and fallback_url.startswith("http"):
+        return fallback_url
+    if fallback_url and re.fullmatch(r"[A-Za-z0-9_-]{11}", fallback_url):
+        return f"https://www.youtube.com/watch?v={fallback_url}"
     return fallback_url or ""
 
 
@@ -103,42 +124,93 @@ def is_browns_daily_title(title: str) -> bool:
     return any(pattern in lowered for pattern in TITLE_PATTERNS)
 
 
-def find_recent_browns_daily_videos() -> list[Video]:
-    log(f"Scanning channel: {CHANNEL_URL}")
+def is_likely_official_browns_upload(entry: dict) -> bool:
+    uploader_blob = " ".join(
+        str(entry.get(key) or "")
+        for key in ("uploader", "channel", "channel_id", "channel_url", "uploader_id", "uploader_url")
+    ).lower()
+    # Keep this intentionally permissive because search metadata varies by YouTube extractor.
+    return not uploader_blob or any(word in uploader_blob for word in ALLOWED_UPLOADER_WORDS)
+
+
+def video_from_entry(entry: dict) -> Video | None:
+    if not entry:
+        return None
+    title = entry.get("title") or ""
+    if not title or not is_browns_daily_title(title):
+        return None
+    if not is_likely_official_browns_upload(entry):
+        return None
+
+    video_id = entry.get("id") or entry.get("display_id") or entry.get("url") or ""
+    url = youtube_watch_url(entry.get("id"), entry.get("webpage_url") or entry.get("url"))
+    if not url:
+        return None
+
+    return Video(
+        title=title,
+        url=url,
+        video_id=video_id,
+        upload_date=normalize_upload_date(entry.get("upload_date")),
+        uploader=entry.get("uploader") or entry.get("channel"),
+    )
+
+
+def collect_entries(source: str, *, playlistend: int | None = None) -> list[dict]:
     opts = {
         "quiet": True,
         "extract_flat": "in_playlist",
         "skip_download": True,
-        "playlistend": 40,
         "ignoreerrors": True,
     }
+    if playlistend is not None:
+        opts["playlistend"] = playlistend
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(CHANNEL_URL, download=False)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(source, download=False)
+    except Exception as exc:  # noqa: BLE001
+        log(f"Could not scan {source!r}: {exc}")
+        return []
 
-    entries = info.get("entries") or []
+    if not info:
+        return []
+    if info.get("entries"):
+        return [entry for entry in info.get("entries") or [] if entry]
+    return [info]
+
+
+def find_recent_browns_daily_videos() -> list[Video]:
     videos: list[Video] = []
+    seen: set[str] = set()
 
-    for entry in entries:
-        if not entry:
-            continue
-        title = entry.get("title") or ""
-        video_id = entry.get("id")
-        url = youtube_watch_url(video_id, entry.get("url"))
-        if title and is_browns_daily_title(title):
-            videos.append(
-                Video(
-                    title=title,
-                    url=url,
-                    video_id=video_id or url,
-                    upload_date=normalize_upload_date(entry.get("upload_date")),
-                )
-            )
-        if len(videos) >= MAX_VIDEOS:
-            break
+    def add_from_entries(entries: list[dict], label: str) -> None:
+        nonlocal videos
+        for entry in entries:
+            video = video_from_entry(entry)
+            if video is None:
+                continue
+            key = video.video_id or video.url
+            if key in seen:
+                continue
+            seen.add(key)
+            videos.append(video)
+            log(f"Matched via {label}: {video.title} ({video.url})")
+            if len(videos) >= MAX_VIDEOS:
+                return
+
+    log(f"Scanning channel: {CHANNEL_URL}")
+    add_from_entries(collect_entries(CHANNEL_URL, playlistend=100), "channel")
+
+    if len(videos) < MAX_VIDEOS:
+        for query in SEARCH_QUERIES:
+            log(f"Searching YouTube fallback: {query}")
+            add_from_entries(collect_entries(query), "search")
+            if len(videos) >= MAX_VIDEOS:
+                break
 
     log(f"Found {len(videos)} Browns Daily videos.")
-    return videos
+    return videos[:MAX_VIDEOS]
 
 
 def choose_subtitle_file(directory: Path) -> Path | None:
@@ -149,6 +221,10 @@ def choose_subtitle_file(directory: Path) -> Path | None:
     # Prefer English-looking files first, but allow any downloaded subtitle file as fallback.
     preferred = [p for p in subtitle_files if any(f".{lang}." in p.name or p.name.endswith(f".{lang}.vtt") for lang in TRANSCRIPT_LANGUAGES)]
     return preferred[0] if preferred else subtitle_files[0]
+
+
+def safe_temp_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", value)[:80] or "subtitle"
 
 
 def download_subtitle(video: Video, *, auto: bool) -> Path | None:
@@ -176,7 +252,7 @@ def download_subtitle(video: Video, *, auto: bool) -> Path | None:
         if subtitle_file is None:
             return None
 
-        persistent = Path(tempfile.gettempdir()) / f"{video.video_id}.{'auto' if auto else 'manual'}.{subtitle_file.suffix.lstrip('.')}"
+        persistent = Path(tempfile.gettempdir()) / f"{safe_temp_name(video.video_id)}.{'auto' if auto else 'manual'}.{subtitle_file.suffix.lstrip('.')}"
         persistent.write_text(subtitle_file.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
         return persistent
 
@@ -273,6 +349,8 @@ def build_document(transcripts: Iterable[Transcript]) -> str:
             "",
             "No Browns Daily captions were found during this run.",
             "",
+            "Troubleshooting note: The GitHub job could edit this document, but it did not find usable YouTube captions. Check the workflow logs for matched titles and caption-download messages.",
+            "",
         ])
         return "\n".join(parts)
 
@@ -285,6 +363,8 @@ def build_document(transcripts: Iterable[Transcript]) -> str:
         ])
         if video.upload_date:
             parts.append(f"Upload date: {video.upload_date}")
+        if video.uploader:
+            parts.append(f"Uploader: {video.uploader}")
         parts.extend([
             "",
             "### Transcript",
