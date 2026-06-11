@@ -36,7 +36,7 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_DOC_ID: ${{ secrets.GOOGLE_DOC_ID }}
-          PODCAST_SPECS: "452827225::Cleveland Browns Podcast Network::Cleveland Browns Daily,Browns Daily|1033244883::The Ken Carman Show with Anthony Lima::"
+          PODCAST_SPECS: "452827225::Cleveland Browns Podcast Network::Cleveland Browns Daily,Browns Daily|1033244883::The Ken Carman Show with Anthony Lima::Full Show"
           MAX_EPISODES_PER_PODCAST: "1"
           RETAIN_EPISODES: "100"
           WHISPER_MODEL_SIZE: "tiny"
