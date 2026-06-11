@@ -14,6 +14,15 @@ type IntelItem = {
   score?: number;
   is_new?: boolean;
   domain?: string;
+  discovered_by_query?: string;
+  collected_at?: string;
+};
+
+type WebSearchMeta = {
+  provider?: string;
+  collected_at?: string;
+  added?: number;
+  queries?: string[];
 };
 
 type Report = {
@@ -24,6 +33,7 @@ type Report = {
   ai_model?: string;
   ai_brief?: string;
   items?: IntelItem[];
+  web_search?: WebSearchMeta;
 };
 
 type SortMode = "signal" | "newest" | "credibility";
@@ -88,6 +98,8 @@ export default function App() {
         item.domain,
         item.category,
         item.source_tier_label,
+        item.source_type,
+        item.discovered_by_query,
       ]
         .filter(Boolean)
         .join(" ")
@@ -122,6 +134,12 @@ export default function App() {
     return [...items].sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 5);
   }, [items]);
 
+  const webSearchItems = useMemo(() => {
+    return [...items]
+      .filter((item) => item.source_type === "web_search")
+      .sort((a, b) => (b.score || 0) - (a.score || 0));
+  }, [items]);
+
   return (
     <main className={`min-h-screen transition-colors duration-300 ${t.page}`}>
       <div className="mx-auto max-w-5xl px-3 py-4 md:px-6 md:py-8">
@@ -137,7 +155,7 @@ export default function App() {
               </h1>
 
               <p className={`mt-2 text-sm leading-6 md:text-base ${t.muted}`}>
-                AI summary and links from the latest Browns stories.
+                AI summary and links from the latest Browns stories, podcasts, YouTube, and web search.
               </p>
             </div>
 
@@ -158,9 +176,10 @@ export default function App() {
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">
+          <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-5">
             <Stat label="Updated" value={formatDate(report?.generated_at)} t={t} />
             <Stat label="Stories" value={String(items.length)} t={t} />
+            <Stat label="Web Search" value={String(webSearchItems.length)} t={t} />
             <Stat label="New" value={String(items.filter((x) => x.is_new).length)} t={t} />
             <Stat label="AI" value={statusLabel(report?.ai_provider_status)} t={t} />
           </div>
@@ -243,9 +262,40 @@ export default function App() {
                         {item.title}
                       </p>
                       <p className={`mt-2 text-xs ${t.muted}`}>
-                        {item.source_name || "Unknown source"}
+                        {sourceTypeLabel(item.source_type)} · {item.source_name || "Unknown source"}
                       </p>
                     </a>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {webSearchItems.length > 0 && (
+              <section className={`mt-4 rounded-3xl border p-4 md:p-6 ${t.panel}`}>
+                <div className="flex items-end justify-between gap-4">
+                  <div>
+                    <p className={`text-[11px] font-black uppercase tracking-[0.22em] ${t.eyebrow}`}>
+                      Web Search Source
+                    </p>
+
+                    <h2 className={`mt-1 text-2xl font-black ${t.heading}`}>
+                      Fresh search finds
+                    </h2>
+                  </div>
+
+                  <p className={`text-sm font-bold ${t.muted}`}>
+                    {webSearchItems.length} found
+                  </p>
+                </div>
+
+                <p className={`mt-2 text-sm leading-6 ${t.muted}`}>
+                  Extra Browns links discovered through web search and filtered for Cleveland relevance.
+                  {report?.web_search?.collected_at ? ` Last searched ${formatDate(report.web_search.collected_at)}.` : ""}
+                </p>
+
+                <div className={`mt-4 divide-y ${t.divider}`}>
+                  {webSearchItems.slice(0, 8).map((item, index) => (
+                    <StoryCompact key={item.id || item.url || index} item={item} t={t} />
                   ))}
                 </div>
               </section>
@@ -329,6 +379,7 @@ function StoryCompact({ item, t }: { item: IntelItem; t: ReturnType<typeof theme
         <div className="min-w-0 flex-1">
           <div className="mb-2 flex flex-wrap gap-2">
             <Badge t={t}>{item.category || "General Browns"}</Badge>
+            <Badge t={t}>{sourceTypeLabel(item.source_type)}</Badge>
             {item.is_new && <Badge t={t} tone="green">New</Badge>}
           </div>
 
@@ -349,6 +400,11 @@ function StoryCompact({ item, t }: { item: IntelItem; t: ReturnType<typeof theme
             <p className={`mt-2 text-sm leading-6 ${t.body}`}>
               {cleanAIText(item.summary || "No summary available.")}
             </p>
+            {item.discovered_by_query && (
+              <p className={`mt-2 text-xs ${t.muted}`}>
+                Found by: {item.discovered_by_query}
+              </p>
+            )}
           </details>
         </div>
 
@@ -541,6 +597,14 @@ function formatDate(value?: string) {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(parsed));
+}
+
+function sourceTypeLabel(value?: string) {
+  if (value === "web_search") return "Web Search";
+  if (value === "podcast") return "Podcast";
+  if (value === "youtube") return "YouTube";
+  if (value === "article") return "Article";
+  return "Source";
 }
 
 function statusLabel(status?: string) {
