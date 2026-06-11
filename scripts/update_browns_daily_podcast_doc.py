@@ -2,6 +2,8 @@
 """Transcribe recent Browns-related podcast episodes and update one Google Doc.
 
 This avoids YouTube's bot checks by using public podcast RSS/audio feeds.
+The document is treated as a rolling archive: new episodes are prepended,
+duplicates are skipped, and the archive is trimmed to RETAIN_EPISODES.
 
 Required environment variables:
   GOOGLE_SERVICE_ACCOUNT_JSON  Raw service-account JSON or base64-encoded JSON
@@ -11,12 +13,14 @@ Optional environment variables:
   PODCAST_SPECS                Pipe-separated specs: apple_id::display_name::optional_filter_terms
                                Example: 452827225::Cleveland Browns Podcast Network::Cleveland Browns Daily,Browns Daily|1033244883::The Ken Carman Show with Anthony Lima::
   MAX_EPISODES_PER_PODCAST     Defaults to 1
+  RETAIN_EPISODES              Defaults to 100 total episodes across all podcasts
   WHISPER_MODEL_SIZE           Defaults to tiny. Good options: tiny, base, small
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -37,6 +41,7 @@ from googleapiclient.discovery import build
 DOC_ID = os.getenv("GOOGLE_DOC_ID")
 SERVICE_ACCOUNT_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 MAX_EPISODES_PER_PODCAST = int(os.getenv("MAX_EPISODES_PER_PODCAST", "1"))
+RETAIN_EPISODES = int(os.getenv("RETAIN_EPISODES", "100"))
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
 PODCAST_SPECS_ENV = os.getenv(
     "PODCAST_SPECS",
@@ -62,6 +67,11 @@ class Episode:
     page_url: str | None = None
     published: str | None = None
     summary: str | None = None
+
+    @property
+    def key(self) -> str:
+        stable = f"{self.podcast_name}|{self.title}|{self.audio_url}"
+        return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -272,69 +282,139 @@ def transcribe_audio(model: WhisperModel, audio_path: Path) -> str:
     return "\n".join(lines).strip()
 
 
-def group_by_podcast(transcripts: Iterable[Transcript]) -> dict[str, list[Transcript]]:
-    grouped: dict[str, list[Transcript]] = {}
-    for transcript in transcripts:
-        grouped.setdefault(transcript.episode.podcast_name, []).append(transcript)
-    return grouped
-
-
-def build_document(transcripts: Iterable[Transcript]) -> str:
-    now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %I:%M %p %Z")
-    transcripts = list(transcripts)
-    grouped = group_by_podcast(transcripts)
-
-    parts = [
-        "# Browns Audio Transcript Feed",
-        "",
-        f"Last updated: {now}",
-        "",
-        "This document is automatically refreshed from multiple Browns-related podcast audio feeds and transcribed with Whisper so NotebookLM can use it as one synced source.",
-        "",
-    ]
-
-    if not transcripts:
-        parts.extend([
-            "## No transcripts available",
-            "",
-            "No podcast audio could be transcribed during this run. Check the GitHub Actions logs.",
-            "",
-        ])
-        return "\n".join(parts)
-
-    for podcast_name, items in grouped.items():
-        parts.extend([f"# {podcast_name}", ""])
-        for idx, item in enumerate(items, start=1):
-            episode = item.episode
-            parts.extend([f"## {idx}. {episode.title}", ""])
-            if episode.published:
-                parts.append(f"Published: {episode.published}")
-            if episode.page_url:
-                parts.append(f"Episode page: {episode.page_url}")
-            parts.append(f"Audio source: {episode.audio_url}")
-            if episode.summary:
-                parts.extend(["", "### Episode summary from feed", "", episode.summary])
-            parts.extend([
-                "",
-                "### Transcript",
-                "",
-                item.text or "Transcript was empty.",
-                "",
-                "---",
-                "",
-            ])
-
-    return "\n".join(parts).strip() + "\n"
-
-
 def get_docs_service():
     info = load_service_account_info()
     credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     return build("docs", "v1", credentials=credentials)
 
 
-def replace_google_doc_text(document_id: str, text: str) -> None:
-    service = get_docs_service()
+def extract_text_from_doc(document: dict) -> str:
+    chunks: list[str] = []
+    for item in document.get("body", {}).get("content", []):
+        paragraph = item.get("paragraph")
+        if not paragraph:
+            continue
+        for element in paragraph.get("elements", []):
+            text_run = element.get("textRun")
+            if text_run and text_run.get("content"):
+                chunks.append(text_run["content"])
+    return "".join(chunks)
+
+
+def get_google_doc_text(service, document_id: str) -> str:
+    document = service.documents().get(documentId=document_id).execute()
+    return extract_text_from_doc(document)
+
+
+def existing_identifiers(existing_text: str) -> set[str]:
+    identifiers: set[str] = set()
+    identifiers.update(re.findall(r"Episode key:\s*([^\n]+)", existing_text))
+    identifiers.update(re.findall(r"Audio source:\s*([^\n]+)", existing_text))
+    return {item.strip() for item in identifiers if item.strip()}
+
+
+def split_existing_episode_blocks(existing_text: str) -> list[str]:
+    """Keep old episode blocks from the current Doc.
+
+    The current and prior formats both separate episodes with ---.
+    We only keep chunks that look like actual episode transcript blocks.
+    """
+    blocks: list[str] = []
+    for raw_block in re.split(r"\n---\s*\n", existing_text):
+        block = raw_block.strip()
+        if not block:
+            continue
+        if "### Transcript" not in block or "Audio source:" not in block:
+            continue
+        # Drop old top-level feed headers accidentally attached before the first episode.
+        lines = block.splitlines()
+        start_idx = 0
+        for idx, line in enumerate(lines):
+            if line.startswith("## "):
+                start_idx = idx
+                break
+        cleaned = "\n".join(lines[start_idx:]).strip()
+        if cleaned:
+            blocks.append(cleaned + "\n\n---")
+    return blocks
+
+
+def render_transcript_block(item: Transcript) -> str:
+    episode = item.episode
+    parts = [
+        f"## [{episode.podcast_name}] {episode.title}",
+        "",
+        f"Episode key: {episode.key}",
+    ]
+    if episode.published:
+        parts.append(f"Published: {episode.published}")
+    if episode.page_url:
+        parts.append(f"Episode page: {episode.page_url}")
+    parts.append(f"Audio source: {episode.audio_url}")
+    if episode.summary:
+        parts.extend(["", "### Episode summary from feed", "", episode.summary])
+    parts.extend([
+        "",
+        "### Transcript",
+        "",
+        item.text or "Transcript was empty.",
+        "",
+        "---",
+    ])
+    return "\n".join(parts).strip()
+
+
+def build_archive_document(new_transcripts: Iterable[Transcript], existing_text: str) -> str:
+    now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %I:%M %p %Z")
+
+    seen_blocks: set[str] = set()
+    episode_blocks: list[str] = []
+
+    for item in new_transcripts:
+        block = render_transcript_block(item)
+        if block not in seen_blocks:
+            seen_blocks.add(block)
+            episode_blocks.append(block)
+
+    for block in split_existing_episode_blocks(existing_text):
+        key_match = re.search(r"Episode key:\s*([^\n]+)", block)
+        audio_match = re.search(r"Audio source:\s*([^\n]+)", block)
+        block_key = key_match.group(1).strip() if key_match else None
+        block_audio = audio_match.group(1).strip() if audio_match else None
+        if block_key and any(f"Episode key: {block_key}" in existing for existing in episode_blocks):
+            continue
+        if block_audio and any(f"Audio source: {block_audio}" in existing for existing in episode_blocks):
+            continue
+        if block not in seen_blocks:
+            seen_blocks.add(block)
+            episode_blocks.append(block.strip())
+
+    retained_blocks = episode_blocks[:RETAIN_EPISODES]
+
+    parts = [
+        "# Browns Audio Transcript Feed",
+        "",
+        f"Last updated: {now}",
+        f"Retention: newest {RETAIN_EPISODES} total episodes across all configured podcasts.",
+        "",
+        "This document is automatically refreshed from multiple Browns-related podcast audio feeds and transcribed with Whisper so NotebookLM can use it as one synced source.",
+        "",
+    ]
+
+    if not retained_blocks:
+        parts.extend([
+            "## No transcripts available",
+            "",
+            "No podcast audio could be transcribed during this run. Check the GitHub Actions logs.",
+            "",
+        ])
+    else:
+        parts.extend(retained_blocks)
+
+    return "\n\n".join(parts).strip() + "\n"
+
+
+def replace_google_doc_text(service, document_id: str, text: str) -> None:
     document = service.documents().get(documentId=document_id).execute()
     body = document.get("body", {}).get("content", [])
     end_index = body[-1].get("endIndex", 1) if body else 1
@@ -352,15 +432,27 @@ def main() -> None:
     if not DOC_ID:
         fail("Missing GOOGLE_DOC_ID secret.")
 
+    service = get_docs_service()
+    existing_text = get_google_doc_text(service, DOC_ID)
+    known = existing_identifiers(existing_text)
+    log(f"Found {len(known)} existing episode identifiers in Google Doc.")
+
     specs = parse_podcast_specs()
-    all_episodes: list[Episode] = []
+    candidate_episodes: list[Episode] = []
     for spec in specs:
-        all_episodes.extend(get_recent_episodes_for_podcast(spec))
+        candidate_episodes.extend(get_recent_episodes_for_podcast(spec))
+
+    new_episodes: list[Episode] = []
+    for episode in candidate_episodes:
+        if episode.key in known or episode.audio_url in known:
+            log(f"Already archived, skipping transcription: [{episode.podcast_name}] {episode.title}")
+            continue
+        new_episodes.append(episode)
 
     transcripts: list[Transcript] = []
     model: WhisperModel | None = None
 
-    for episode in all_episodes:
+    for episode in new_episodes:
         audio_path: Path | None = None
         try:
             if model is None:
@@ -377,8 +469,11 @@ def main() -> None:
                 except Exception:
                     pass
 
-    document_text = build_document(transcripts)
-    replace_google_doc_text(DOC_ID, document_text)
+    if not transcripts:
+        log("No new episodes needed transcription. Rebuilding archive header and preserving existing episode blocks.")
+
+    document_text = build_archive_document(transcripts, existing_text)
+    replace_google_doc_text(service, DOC_ID, document_text)
 
 
 if __name__ == "__main__":
