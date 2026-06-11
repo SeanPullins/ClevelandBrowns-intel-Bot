@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Transcribe recent Cleveland Browns Daily podcast episodes and update a Google Doc.
+"""Transcribe recent Browns-related podcast episodes and update one Google Doc.
 
-This avoids YouTube's bot checks by using the public podcast RSS/audio feed.
+This avoids YouTube's bot checks by using public podcast RSS/audio feeds.
 
 Required environment variables:
   GOOGLE_SERVICE_ACCOUNT_JSON  Raw service-account JSON or base64-encoded JSON
   GOOGLE_DOC_ID                Target Google Doc ID
 
 Optional environment variables:
-  PODCAST_RSS_URL              Direct RSS feed URL. If omitted, script resolves Apple podcast ID.
-  APPLE_PODCAST_ID             Defaults to 452827225
-  MAX_PODCAST_EPISODES         Defaults to 1
+  PODCAST_SPECS                Pipe-separated specs: apple_id::display_name::optional_filter_terms
+                               Example: 452827225::Cleveland Browns Podcast Network::Cleveland Browns Daily,Browns Daily|1033244883::The Ken Carman Show with Anthony Lima::
+  MAX_EPISODES_PER_PODCAST     Defaults to 1
   WHISPER_MODEL_SIZE           Defaults to tiny. Good options: tiny, base, small
-  EPISODE_TITLE_FILTERS        Defaults to Cleveland Browns Daily,Browns Daily
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ import base64
 import json
 import os
 import re
-import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -38,22 +36,27 @@ from googleapiclient.discovery import build
 
 DOC_ID = os.getenv("GOOGLE_DOC_ID")
 SERVICE_ACCOUNT_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-APPLE_PODCAST_ID = os.getenv("APPLE_PODCAST_ID", "452827225")
-PODCAST_RSS_URL = os.getenv("PODCAST_RSS_URL", "").strip()
-MAX_EPISODES = int(os.getenv("MAX_PODCAST_EPISODES", "1"))
+MAX_EPISODES_PER_PODCAST = int(os.getenv("MAX_EPISODES_PER_PODCAST", "1"))
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
-EPISODE_TITLE_FILTERS = [
-    item.strip().lower()
-    for item in os.getenv("EPISODE_TITLE_FILTERS", "Cleveland Browns Daily,Browns Daily").split(",")
-    if item.strip()
-]
+PODCAST_SPECS_ENV = os.getenv(
+    "PODCAST_SPECS",
+    "452827225::Cleveland Browns Podcast Network::Cleveland Browns Daily,Browns Daily|1033244883::The Ken Carman Show with Anthony Lima::",
+)
 
 SCOPES = ["https://www.googleapis.com/auth/documents"]
-USER_AGENT = "Mozilla/5.0 BrownsDailyTranscriptBot/1.0"
+USER_AGENT = "Mozilla/5.0 BrownsPodcastTranscriptBot/1.0"
+
+
+@dataclass(frozen=True)
+class PodcastSpec:
+    apple_id: str
+    display_name: str
+    filters: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class Episode:
+    podcast_name: str
     title: str
     audio_url: str
     page_url: str | None = None
@@ -68,12 +71,32 @@ class Transcript:
 
 
 def log(message: str) -> None:
-    print(f"[browns-daily-podcast] {message}", flush=True)
+    print(f"[browns-podcast-transcripts] {message}", flush=True)
 
 
 def fail(message: str, code: int = 1) -> None:
-    print(f"ERROR: {message}", file=sys.stderr, flush=True)
+    print(f"ERROR: {message}", flush=True)
     raise SystemExit(code)
+
+
+def parse_podcast_specs() -> list[PodcastSpec]:
+    specs: list[PodcastSpec] = []
+    for raw_spec in PODCAST_SPECS_ENV.split("|"):
+        raw_spec = raw_spec.strip()
+        if not raw_spec:
+            continue
+        parts = raw_spec.split("::")
+        if len(parts) < 2:
+            fail(f"Bad PODCAST_SPECS entry: {raw_spec!r}")
+        apple_id = parts[0].strip()
+        display_name = parts[1].strip() or f"Apple Podcast {apple_id}"
+        filters: tuple[str, ...] = ()
+        if len(parts) >= 3 and parts[2].strip():
+            filters = tuple(item.strip().lower() for item in parts[2].split(",") if item.strip())
+        specs.append(PodcastSpec(apple_id=apple_id, display_name=display_name, filters=filters))
+    if not specs:
+        fail("No podcast specs configured.")
+    return specs
 
 
 def load_service_account_info() -> dict:
@@ -93,23 +116,19 @@ def load_service_account_info() -> dict:
         fail(f"GOOGLE_SERVICE_ACCOUNT_JSON is neither raw JSON nor base64 JSON: {exc}")
 
 
-def resolve_rss_url() -> str:
-    if PODCAST_RSS_URL:
-        log(f"Using PODCAST_RSS_URL: {PODCAST_RSS_URL}")
-        return PODCAST_RSS_URL
-
-    lookup_url = f"https://itunes.apple.com/lookup?id={APPLE_PODCAST_ID}"
-    log(f"Resolving Apple podcast RSS feed from: {lookup_url}")
+def resolve_rss_url(spec: PodcastSpec) -> str:
+    lookup_url = f"https://itunes.apple.com/lookup?id={spec.apple_id}"
+    log(f"Resolving RSS feed for {spec.display_name}: {lookup_url}")
     response = requests.get(lookup_url, headers={"User-Agent": USER_AGENT}, timeout=30)
     response.raise_for_status()
     data = response.json()
     results = data.get("results") or []
     if not results:
-        fail(f"Apple lookup returned no results for podcast ID {APPLE_PODCAST_ID}.")
+        fail(f"Apple lookup returned no results for podcast ID {spec.apple_id}.")
     feed_url = results[0].get("feedUrl")
     if not feed_url:
-        fail("Apple lookup did not include a feedUrl.")
-    log(f"Resolved RSS feed: {feed_url}")
+        fail(f"Apple lookup did not include a feedUrl for {spec.display_name}.")
+    log(f"Resolved RSS feed for {spec.display_name}: {feed_url}")
     return feed_url
 
 
@@ -138,27 +157,35 @@ def get_audio_url(entry: dict) -> str | None:
     return None
 
 
-def looks_like_browns_daily(entry: dict) -> bool:
-    blob = " ".join(
-        str(entry.get(key) or "")
-        for key in ("title", "summary", "description")
-    ).lower()
-    return any(token in blob for token in EPISODE_TITLE_FILTERS)
+def entry_matches_filters(entry: dict, filters: tuple[str, ...]) -> bool:
+    if not filters:
+        return True
+    blob = " ".join(str(entry.get(key) or "") for key in ("title", "summary", "description")).lower()
+    return any(token in blob for token in filters)
 
 
-def get_recent_episodes() -> list[Episode]:
-    feed_url = resolve_rss_url()
-    log("Parsing podcast feed.")
+def clean_summary(summary: str | None) -> str | None:
+    if not summary:
+        return None
+    cleaned = re.sub(r"<[^>]+>", "", summary)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+
+def get_recent_episodes_for_podcast(spec: PodcastSpec) -> list[Episode]:
+    feed_url = resolve_rss_url(spec)
+    log(f"Parsing podcast feed for {spec.display_name}.")
     parsed = feedparser.parse(feed_url)
     if parsed.bozo:
-        log(f"Feed parser warning: {parsed.bozo_exception}")
+        log(f"Feed parser warning for {spec.display_name}: {parsed.bozo_exception}")
     entries = parsed.entries or []
     if not entries:
-        fail("No podcast episodes found in RSS feed.")
+        log(f"No podcast episodes found for {spec.display_name}.")
+        return []
 
     selected: list[Episode] = []
     for entry in entries:
-        if not looks_like_browns_daily(entry):
+        if not entry_matches_filters(entry, spec.filters):
             continue
         audio_url = get_audio_url(entry)
         if not audio_url:
@@ -166,36 +193,38 @@ def get_recent_episodes() -> list[Episode]:
             continue
         selected.append(
             Episode(
+                podcast_name=spec.display_name,
                 title=entry.get("title") or "Untitled episode",
                 audio_url=audio_url,
                 page_url=entry.get("link"),
                 published=normalize_date(entry),
-                summary=re.sub(r"<[^>]+>", "", entry.get("summary") or "").strip() or None,
+                summary=clean_summary(entry.get("summary")),
             )
         )
-        if len(selected) >= MAX_EPISODES:
+        if len(selected) >= MAX_EPISODES_PER_PODCAST:
             break
 
-    if not selected:
-        log("No title-filtered episodes found. Falling back to newest audio episode.")
+    if not selected and spec.filters:
+        log(f"No filtered episodes found for {spec.display_name}. Falling back to newest audio episode.")
         for entry in entries:
             audio_url = get_audio_url(entry)
             if not audio_url:
                 continue
             selected.append(
                 Episode(
+                    podcast_name=spec.display_name,
                     title=entry.get("title") or "Untitled episode",
                     audio_url=audio_url,
                     page_url=entry.get("link"),
                     published=normalize_date(entry),
-                    summary=re.sub(r"<[^>]+>", "", entry.get("summary") or "").strip() or None,
+                    summary=clean_summary(entry.get("summary")),
                 )
             )
             break
 
-    log(f"Selected {len(selected)} podcast episode(s).")
+    log(f"Selected {len(selected)} episode(s) for {spec.display_name}.")
     for episode in selected:
-        log(f"Selected episode: {episode.title}")
+        log(f"Selected episode: [{episode.podcast_name}] {episode.title}")
     return selected
 
 
@@ -212,9 +241,9 @@ def safe_filename(value: str) -> str:
 
 def download_audio(episode: Episode) -> Path:
     suffix = extension_from_url(episode.audio_url)
-    audio_path = Path(tempfile.gettempdir()) / f"{safe_filename(episode.title)}{suffix}"
-    log(f"Downloading audio: {episode.audio_url}")
-    with requests.get(episode.audio_url, headers={"User-Agent": USER_AGENT}, stream=True, timeout=60) as response:
+    audio_path = Path(tempfile.gettempdir()) / f"{safe_filename(episode.podcast_name + '_' + episode.title)}{suffix}"
+    log(f"Downloading audio for [{episode.podcast_name}] {episode.title}: {episode.audio_url}")
+    with requests.get(episode.audio_url, headers={"User-Agent": USER_AGENT}, stream=True, timeout=90) as response:
         response.raise_for_status()
         with audio_path.open("wb") as handle:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
@@ -225,10 +254,12 @@ def download_audio(episode: Episode) -> Path:
     return audio_path
 
 
-def transcribe_audio(audio_path: Path) -> str:
-    log(f"Loading Whisper model: {WHISPER_MODEL_SIZE}")
-    # int8 keeps GitHub Actions CPU memory usage manageable.
-    model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+def load_whisper_model() -> WhisperModel:
+    log(f"Loading Whisper model once: {WHISPER_MODEL_SIZE}")
+    return WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+
+
+def transcribe_audio(model: WhisperModel, audio_path: Path) -> str:
     log("Transcribing audio. This can take several minutes.")
     segments, info = model.transcribe(str(audio_path), beam_size=1, language="en", vad_filter=True)
     log(f"Detected language: {info.language} probability={info.language_probability:.2f}")
@@ -241,16 +272,24 @@ def transcribe_audio(audio_path: Path) -> str:
     return "\n".join(lines).strip()
 
 
+def group_by_podcast(transcripts: Iterable[Transcript]) -> dict[str, list[Transcript]]:
+    grouped: dict[str, list[Transcript]] = {}
+    for transcript in transcripts:
+        grouped.setdefault(transcript.episode.podcast_name, []).append(transcript)
+    return grouped
+
+
 def build_document(transcripts: Iterable[Transcript]) -> str:
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %I:%M %p %Z")
     transcripts = list(transcripts)
+    grouped = group_by_podcast(transcripts)
 
     parts = [
-        "# Browns Daily Podcast Transcript Feed",
+        "# Browns Audio Transcript Feed",
         "",
         f"Last updated: {now}",
         "",
-        "This document is automatically refreshed from the Cleveland Browns podcast audio feed and transcribed with Whisper so NotebookLM can use it as a synced source.",
+        "This document is automatically refreshed from multiple Browns-related podcast audio feeds and transcribed with Whisper so NotebookLM can use it as one synced source.",
         "",
     ]
 
@@ -263,28 +302,27 @@ def build_document(transcripts: Iterable[Transcript]) -> str:
         ])
         return "\n".join(parts)
 
-    for idx, item in enumerate(transcripts, start=1):
-        episode = item.episode
-        parts.extend([
-            f"## {idx}. {episode.title}",
-            "",
-        ])
-        if episode.published:
-            parts.append(f"Published: {episode.published}")
-        if episode.page_url:
-            parts.append(f"Episode page: {episode.page_url}")
-        parts.append(f"Audio source: {episode.audio_url}")
-        if episode.summary:
-            parts.extend(["", "### Episode summary from feed", "", episode.summary])
-        parts.extend([
-            "",
-            "### Transcript",
-            "",
-            item.text or "Transcript was empty.",
-            "",
-            "---",
-            "",
-        ])
+    for podcast_name, items in grouped.items():
+        parts.extend([f"# {podcast_name}", ""])
+        for idx, item in enumerate(items, start=1):
+            episode = item.episode
+            parts.extend([f"## {idx}. {episode.title}", ""])
+            if episode.published:
+                parts.append(f"Published: {episode.published}")
+            if episode.page_url:
+                parts.append(f"Episode page: {episode.page_url}")
+            parts.append(f"Audio source: {episode.audio_url}")
+            if episode.summary:
+                parts.extend(["", "### Episode summary from feed", "", episode.summary])
+            parts.extend([
+                "",
+                "### Transcript",
+                "",
+                item.text or "Transcript was empty.",
+                "",
+                "---",
+                "",
+            ])
 
     return "\n".join(parts).strip() + "\n"
 
@@ -314,17 +352,24 @@ def main() -> None:
     if not DOC_ID:
         fail("Missing GOOGLE_DOC_ID secret.")
 
-    episodes = get_recent_episodes()
-    transcripts: list[Transcript] = []
+    specs = parse_podcast_specs()
+    all_episodes: list[Episode] = []
+    for spec in specs:
+        all_episodes.extend(get_recent_episodes_for_podcast(spec))
 
-    for episode in episodes:
+    transcripts: list[Transcript] = []
+    model: WhisperModel | None = None
+
+    for episode in all_episodes:
         audio_path: Path | None = None
         try:
+            if model is None:
+                model = load_whisper_model()
             audio_path = download_audio(episode)
-            text = transcribe_audio(audio_path)
+            text = transcribe_audio(model, audio_path)
             transcripts.append(Transcript(episode=episode, text=text))
         except Exception as exc:  # noqa: BLE001
-            log(f"Failed to process episode {episode.title!r}: {exc}")
+            log(f"Failed to process episode [{episode.podcast_name}] {episode.title!r}: {exc}")
         finally:
             if audio_path:
                 try:
