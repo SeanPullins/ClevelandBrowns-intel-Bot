@@ -20,6 +20,16 @@ const SEARCH_QUERIES = [
   "site:nfl.com Cleveland Browns"
 ];
 
+const GOOGLE_NEWS_QUERIES = [
+  "Cleveland Browns",
+  "Cleveland Browns roster",
+  "Cleveland Browns injury",
+  "Cleveland Browns quarterback",
+  "Cleveland Browns practice",
+  "Cleveland Browns rumors",
+  "Cleveland Browns press conference"
+];
+
 const STRONG_TERMS = [
   "cleveland browns",
   "clevelandbrowns.com",
@@ -64,6 +74,18 @@ function getDomain(url) {
   }
 }
 
+function decodeXml(value) {
+  return String(value || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+}
+
 function brownsScore(item) {
   const haystack = [item.title, item.summary, item.url, item.source_name, item.domain]
     .filter(Boolean)
@@ -91,6 +113,36 @@ function makeId(url, title) {
   return crypto.createHash("sha256").update(`${url}|${title}`).digest("hex").slice(0, 16);
 }
 
+function buildItem({ title, url, summary, published, query, provider }) {
+  const cleanUrl = normalizeUrl(url);
+  const domain = getDomain(cleanUrl);
+  const item = {
+    id: makeId(cleanUrl, title),
+    title: String(title || "").trim(),
+    url: cleanUrl,
+    source_name: domain || provider,
+    source_type: "web_search",
+    source_tier_label: provider,
+    credibility_score: provider === "Tavily Web Search" ? 62 : 58,
+    domain,
+    category: inferCategory(`${title} ${summary}`),
+    published: published || new Date().toISOString(),
+    summary: String(summary || "").trim(),
+    score: provider === "Tavily Web Search" ? 35 : 32,
+    score_reasons: ["web_search +10", "browns relevance filter"],
+    is_new: true,
+    discovered_by_query: query,
+    collected_at: new Date().toISOString()
+  };
+
+  const relevance = brownsScore(item);
+  if (!item.title || !item.url || relevance < 2) return null;
+
+  item.score += relevance * 4;
+  item.score_reasons.push(`browns_score +${relevance * 4}`);
+  return item;
+}
+
 async function tavilySearch(query) {
   const response = await fetch("https://api.tavily.com/search", {
     method: "POST",
@@ -112,7 +164,52 @@ async function tavilySearch(query) {
     throw new Error(`Tavily ${response.status}: ${body.slice(0, 200)}`);
   }
 
-  return response.json();
+  const data = await response.json();
+  const results = Array.isArray(data.results) ? data.results : [];
+
+  return results.map((result) =>
+    buildItem({
+      title: result.title,
+      url: result.url,
+      summary: result.content,
+      published: result.published_date,
+      query,
+      provider: "Tavily Web Search"
+    })
+  ).filter(Boolean);
+}
+
+async function googleNewsSearch(query) {
+  const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
+  const response = await fetch(rssUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 BrownsIntelBot/1.0"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google News RSS ${response.status}`);
+  }
+
+  const xml = await response.text();
+  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, MAX_RESULTS_PER_QUERY);
+
+  return items.map((match) => {
+    const chunk = match[1];
+    const title = decodeXml(chunk.match(/<title>([\s\S]*?)<\/title>/)?.[1]);
+    const url = decodeXml(chunk.match(/<link>([\s\S]*?)<\/link>/)?.[1]);
+    const summary = decodeXml(chunk.match(/<description>([\s\S]*?)<\/description>/)?.[1]);
+    const published = decodeXml(chunk.match(/<pubDate>([\s\S]*?)<\/pubDate>/)?.[1]);
+
+    return buildItem({
+      title,
+      url,
+      summary,
+      published,
+      query,
+      provider: "Google News Search"
+    });
+  }).filter(Boolean);
 }
 
 async function main() {
@@ -121,71 +218,51 @@ async function main() {
     return;
   }
 
-  if (!TAVILY_API_KEY) {
-    console.log("TAVILY_API_KEY missing. Skipping web search source.");
-    return;
-  }
-
   const report = JSON.parse(fs.readFileSync(DATA_PATH, "utf8"));
   const existingItems = Array.isArray(report.items) ? report.items : [];
   const seenUrls = new Set(existingItems.map((item) => normalizeUrl(item.url)).filter(Boolean));
   const collectedAt = new Date().toISOString();
   const newItems = [];
+  const providerNotes = [];
 
-  for (const query of SEARCH_QUERIES) {
+  if (TAVILY_API_KEY) {
+    providerNotes.push("tavily");
+    for (const query of SEARCH_QUERIES) {
+      try {
+        for (const item of await tavilySearch(query)) {
+          if (seenUrls.has(item.url)) continue;
+          item.collected_at = collectedAt;
+          seenUrls.add(item.url);
+          newItems.push(item);
+        }
+      } catch (error) {
+        console.log(`Tavily web search failed for '${query}': ${error.message}`);
+      }
+    }
+  } else {
+    console.log("TAVILY_API_KEY missing. Using Google News RSS fallback.");
+  }
+
+  providerNotes.push("google_news_rss");
+  for (const query of GOOGLE_NEWS_QUERIES) {
     try {
-      const data = await tavilySearch(query);
-      const results = Array.isArray(data.results) ? data.results : [];
-
-      for (const result of results) {
-        const url = normalizeUrl(result.url);
-        if (!url || seenUrls.has(url)) continue;
-
-        const title = String(result.title || "").trim();
-        const summary = String(result.content || "").trim();
-        const domain = getDomain(url);
-
-        if (!title) continue;
-
-        const item = {
-          id: makeId(url, title),
-          title,
-          url,
-          source_name: domain || "Web Search",
-          source_type: "web_search",
-          source_tier_label: "Web Search",
-          credibility_score: 62,
-          domain,
-          category: inferCategory(`${title} ${summary}`),
-          published: result.published_date || collectedAt,
-          summary,
-          score: 35,
-          score_reasons: ["web_search +10", "browns relevance filter"],
-          is_new: true,
-          discovered_by_query: query,
-          collected_at: collectedAt
-        };
-
-        const relevance = brownsScore(item);
-        if (relevance < 2) continue;
-
-        item.score += relevance * 4;
-        item.score_reasons.push(`browns_score +${relevance * 4}`);
-
-        seenUrls.add(url);
+      for (const item of await googleNewsSearch(query)) {
+        if (seenUrls.has(item.url)) continue;
+        item.collected_at = collectedAt;
+        seenUrls.add(item.url);
         newItems.push(item);
       }
     } catch (error) {
-      console.log(`Web search failed for '${query}': ${error.message}`);
+      console.log(`Google News RSS search failed for '${query}': ${error.message}`);
     }
   }
 
   report.items = [...newItems, ...existingItems];
   report.web_search = {
-    provider: "tavily",
+    provider: providerNotes.join("+"),
     collected_at: collectedAt,
     added: newItems.length,
-    queries: SEARCH_QUERIES
+    queries: TAVILY_API_KEY ? [...SEARCH_QUERIES, ...GOOGLE_NEWS_QUERIES] : GOOGLE_NEWS_QUERIES
   };
 
   fs.writeFileSync(DATA_PATH, `${JSON.stringify(report, null, 2)}\n`);
