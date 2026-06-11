@@ -1,4 +1,4 @@
-name: Browns Daily Podcast Transcript Feed
+name: Browns Audio Podcast Transcript Feed
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ permissions:
 jobs:
   update-podcast-transcript-feed:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Check out repo
@@ -32,12 +32,11 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-podcast-transcripts.txt
 
-      - name: Update Browns Daily podcast Google Doc
+      - name: Update Browns audio podcast Google Doc
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_DOC_ID: ${{ secrets.GOOGLE_DOC_ID }}
-          APPLE_PODCAST_ID: "452827225"
-          MAX_PODCAST_EPISODES: "1"
+          PODCAST_SPECS: "452827225::Cleveland Browns Podcast Network::Cleveland Browns Daily,Browns Daily|1033244883::The Ken Carman Show with Anthony Lima::"
+          MAX_EPISODES_PER_PODCAST: "1"
           WHISPER_MODEL_SIZE: "tiny"
-          EPISODE_TITLE_FILTERS: "Cleveland Browns Daily,Browns Daily"
         run: python scripts/update_browns_daily_podcast_doc.py
