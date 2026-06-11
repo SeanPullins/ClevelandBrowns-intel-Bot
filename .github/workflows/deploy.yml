@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "0 11,17,23 * * *"
 
 permissions:
   contents: read
@@ -30,6 +32,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Add Browns web search source
+        env:
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+        run: node scripts/add-web-search.mjs
 
       - name: Build
         run: npm run build
