@@ -2,10 +2,6 @@ name: Browns Daily Transcript Feed
 
 on:
   workflow_dispatch:
-  schedule:
-    # 5:30 PM America/New_York during daylight saving time.
-    # GitHub Actions cron runs in UTC. Adjust to 22:30 UTC during standard time if exact winter timing matters.
-    - cron: "30 21 * * 1-5"
 
 permissions:
   contents: read
