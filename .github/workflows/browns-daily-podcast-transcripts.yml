@@ -2,6 +2,11 @@ name: Browns Audio Podcast Transcript Feed
 
 on:
   workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Optional episode publish date to pull, for example 2026-06-12"
+        required: false
+        default: ""
   schedule:
     # 6:15 PM America/New_York during daylight saving time.
     # GitHub Actions cron runs in UTC. Adjust to 23:15 UTC during standard time if exact winter timing matters.
@@ -42,4 +47,5 @@ jobs:
           MAX_EPISODES_PER_PODCAST: "1"
           RETAIN_EPISODES: "100"
           WHISPER_MODEL_SIZE: "tiny"
+          TARGET_PODCAST_DATE: ${{ github.event.inputs.target_date }}
         run: python scripts/update_browns_daily_podcast_doc.py
