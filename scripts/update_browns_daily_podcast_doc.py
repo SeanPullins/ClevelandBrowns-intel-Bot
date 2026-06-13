@@ -15,6 +15,7 @@ Optional environment variables:
   MAX_EPISODES_PER_PODCAST     Defaults to 1
   RETAIN_EPISODES              Defaults to 100 total episodes across all podcasts
   WHISPER_MODEL_SIZE           Defaults to tiny. Good options: tiny, base, small
+  TARGET_PODCAST_DATE          Optional target publish date, e.g. 2026-06-12 or 6/12/2026
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ SERVICE_ACCOUNT_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 MAX_EPISODES_PER_PODCAST = int(os.getenv("MAX_EPISODES_PER_PODCAST", "1"))
 RETAIN_EPISODES = int(os.getenv("RETAIN_EPISODES", "100"))
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
+TARGET_PODCAST_DATE_RAW = os.getenv("TARGET_PODCAST_DATE", "").strip()
 PODCAST_SPECS_ENV = os.getenv(
     "PODCAST_SPECS",
     "452827225::Cleveland Browns Podcast Network::Cleveland Browns Daily,Browns Daily|1033244883::The Ken Carman Show with Anthony Lima::",
@@ -87,6 +89,38 @@ def log(message: str) -> None:
 def fail(message: str, code: int = 1) -> None:
     print(f"ERROR: {message}", flush=True)
     raise SystemExit(code)
+
+
+def parse_target_date() -> object | None:
+    """Return a date object for TARGET_PODCAST_DATE, or None when not requested."""
+    raw = TARGET_PODCAST_DATE_RAW.strip()
+    if not raw:
+        return None
+
+    default = datetime(datetime.now().year, 1, 1)
+    try:
+        return date_parser.parse(raw, default=default).date()
+    except Exception as exc:  # noqa: BLE001
+        fail(f"Bad TARGET_PODCAST_DATE value {raw!r}. Use YYYY-MM-DD, e.g. 2026-06-12. Error: {exc}")
+
+
+def parse_entry_datetime(entry: dict) -> datetime | None:
+    raw = entry.get("published") or entry.get("updated") or entry.get("pubDate")
+    if not raw:
+        return None
+    try:
+        return date_parser.parse(raw)
+    except Exception:
+        return None
+
+
+def entry_matches_target_date(entry: dict, target_date: object | None) -> bool:
+    if target_date is None:
+        return True
+    parsed = parse_entry_datetime(entry)
+    if parsed is None:
+        return False
+    return parsed.date() == target_date
 
 
 def parse_podcast_specs() -> list[PodcastSpec]:
@@ -143,14 +177,11 @@ def resolve_rss_url(spec: PodcastSpec) -> str:
 
 
 def normalize_date(entry: dict) -> str | None:
-    raw = entry.get("published") or entry.get("updated") or entry.get("pubDate")
-    if not raw:
-        return None
-    try:
-        parsed = date_parser.parse(raw)
+    parsed = parse_entry_datetime(entry)
+    if parsed is not None:
         return parsed.strftime("%Y-%m-%d %I:%M %p %Z").strip()
-    except Exception:
-        return str(raw)
+    raw = entry.get("published") or entry.get("updated") or entry.get("pubDate")
+    return str(raw) if raw else None
 
 
 def get_audio_url(entry: dict) -> str | None:
@@ -182,7 +213,22 @@ def clean_summary(summary: str | None) -> str | None:
     return cleaned or None
 
 
-def get_recent_episodes_for_podcast(spec: PodcastSpec) -> list[Episode]:
+def build_episode(spec: PodcastSpec, entry: dict) -> Episode | None:
+    audio_url = get_audio_url(entry)
+    if not audio_url:
+        log(f"Skipping episode with no audio enclosure: {entry.get('title', 'Untitled')}")
+        return None
+    return Episode(
+        podcast_name=spec.display_name,
+        title=entry.get("title") or "Untitled episode",
+        audio_url=audio_url,
+        page_url=entry.get("link"),
+        published=normalize_date(entry),
+        summary=clean_summary(entry.get("summary")),
+    )
+
+
+def get_recent_episodes_for_podcast(spec: PodcastSpec, target_date: object | None) -> list[Episode]:
     feed_url = resolve_rss_url(spec)
     log(f"Parsing podcast feed for {spec.display_name}.")
     parsed = feedparser.parse(feed_url)
@@ -193,48 +239,45 @@ def get_recent_episodes_for_podcast(spec: PodcastSpec) -> list[Episode]:
         log(f"No podcast episodes found for {spec.display_name}.")
         return []
 
+    if target_date is not None:
+        log(f"Targeting episodes published on {target_date} for {spec.display_name}.")
+
     selected: list[Episode] = []
+    filtered_out_by_date = 0
+    filtered_out_by_terms = 0
+
     for entry in entries:
+        if not entry_matches_target_date(entry, target_date):
+            filtered_out_by_date += 1
+            continue
         if not entry_matches_filters(entry, spec.filters):
+            filtered_out_by_terms += 1
             continue
-        audio_url = get_audio_url(entry)
-        if not audio_url:
-            log(f"Skipping episode with no audio enclosure: {entry.get('title', 'Untitled')}")
+        episode = build_episode(spec, entry)
+        if not episode:
             continue
-        selected.append(
-            Episode(
-                podcast_name=spec.display_name,
-                title=entry.get("title") or "Untitled episode",
-                audio_url=audio_url,
-                page_url=entry.get("link"),
-                published=normalize_date(entry),
-                summary=clean_summary(entry.get("summary")),
-            )
-        )
+        selected.append(episode)
         if len(selected) >= MAX_EPISODES_PER_PODCAST:
             break
 
-    if not selected and spec.filters:
+    # Only fall back to newest audio episode for normal scheduled runs. Date-targeted runs must be exact.
+    if not selected and spec.filters and target_date is None:
         log(f"No filtered episodes found for {spec.display_name}. Falling back to newest audio episode.")
         for entry in entries:
-            audio_url = get_audio_url(entry)
-            if not audio_url:
-                continue
-            selected.append(
-                Episode(
-                    podcast_name=spec.display_name,
-                    title=entry.get("title") or "Untitled episode",
-                    audio_url=audio_url,
-                    page_url=entry.get("link"),
-                    published=normalize_date(entry),
-                    summary=clean_summary(entry.get("summary")),
-                )
-            )
-            break
+            episode = build_episode(spec, entry)
+            if episode:
+                selected.append(episode)
+                break
+
+    if not selected and target_date is not None:
+        log(
+            f"No matching episode found for {spec.display_name} on {target_date}. "
+            f"Date-filtered out {filtered_out_by_date}; term-filtered out {filtered_out_by_terms}."
+        )
 
     log(f"Selected {len(selected)} episode(s) for {spec.display_name}.")
     for episode in selected:
-        log(f"Selected episode: [{episode.podcast_name}] {episode.title}")
+        log(f"Selected episode: [{episode.podcast_name}] {episode.title} | Published: {episode.published}")
     return selected
 
 
@@ -432,6 +475,10 @@ def main() -> None:
     if not DOC_ID:
         fail("Missing GOOGLE_DOC_ID secret.")
 
+    target_date = parse_target_date()
+    if target_date is not None:
+        log(f"Manual target date requested: {target_date}")
+
     service = get_docs_service()
     existing_text = get_google_doc_text(service, DOC_ID)
     known = existing_identifiers(existing_text)
@@ -440,7 +487,7 @@ def main() -> None:
     specs = parse_podcast_specs()
     candidate_episodes: list[Episode] = []
     for spec in specs:
-        candidate_episodes.extend(get_recent_episodes_for_podcast(spec))
+        candidate_episodes.extend(get_recent_episodes_for_podcast(spec, target_date))
 
     new_episodes: list[Episode] = []
     for episode in candidate_episodes:
